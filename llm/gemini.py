@@ -6,11 +6,10 @@ PROMTE = """Проанализируй следующий текст и сост
 Текст для анализа:"""
 API_key = get_token_gemini()
 print(API_key)
-client = genai.Client(api_key=API_key)
-
 
 
 def send_promte(promte):
+    client = genai.Client(api_key=API_key)
     response = client.models.generate_content(
         model="gemini-3-flash-preview", contents=PROMTE+promte
     )

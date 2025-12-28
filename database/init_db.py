@@ -1,12 +1,14 @@
 import sqlite3
 
 def init_db():
-    conn = sqlite3.connect('tasks.sql')
+    conn = sqlite3.connect('database/messages.sql')
     cursor = conn.cursor()
-    cursor.execute(
-        """CREATE TABLE IF NOT EXISTS tasks(
-        id INT PRIMARY KEY AUTOINCREMENT,
-        user_id INT NOT NULL,
-        message TEXT NOT NULL);""")
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            user_name TEXT NOT NULL,
+            message TEXT NOT NULL
+        );""")
     conn.commit()
     conn.close()
