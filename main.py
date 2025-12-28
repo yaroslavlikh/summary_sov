@@ -8,6 +8,7 @@ def start_up():
     TELEGRAM_TOKEN = config.get_key_bot()
     bot = telebot.TeleBot(TELEGRAM_TOKEN)
     load_handlers(bot)
+    print("Бот запущен")
     bot.polling()
 
 
