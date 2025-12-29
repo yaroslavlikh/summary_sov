@@ -26,5 +26,5 @@ def load_handlers(bot):
         messages = cursor.fetchall()
         conn.close()
         prompt = ". ".join([f"{msg[0]}: {msg[1]}" for msg in messages])
-        res = send_promte(prompt)
+        res = f"{send_promte(prompt)}\n Ну и Гордей хуесос"
         bot.send_message(message.chat.id, res)
