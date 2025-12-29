@@ -1,2 +1,6 @@
 .env
 __pycache__
+database/messages.sql
+database/__pycache__
+handlers/__pycache__
+llm/__pycache__
