@@ -64,6 +64,7 @@ def load_handlers(bot):
         messages = cursor.fetchall()
         conn.close()
         prompt = ". ".join([f"{msg[0]}: {msg[1]}" for msg in messages])
+        print(prompt)
         try:
             res = f"{send_prompt(prompt)}\nИ напоминание от нашей компании Google: Гордей хуесос"
         except Exception as e:
