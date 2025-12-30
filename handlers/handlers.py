@@ -47,7 +47,7 @@ def load_handlers(bot):
         _ = message.text.split()
         if len(_) > 1:
             if _[1].isdigit():
-                limit = min(int(_[1]), int(cursor.execute("SELECT MAX(id) FROM messages").fetchone()[0]))
+                limit = min(int(_[1]), int(cursor.execute("SELECT COUNT(*) FROM messages WHERE user_id = ?", (message.chat.id,)).fetchone()[0]))
 
         print("Создание краткого содержания")
 
