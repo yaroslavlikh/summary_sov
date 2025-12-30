@@ -7,7 +7,6 @@ import requests
 
 import socket
 socket.setdefaulttimeout(30)
-socket.has_ipv6 = False
 
 print("TEST TELEGRAM CONNECT")
 print(requests.get("https://api.telegram.org").status_code)
