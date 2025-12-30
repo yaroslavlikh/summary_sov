@@ -4,3 +4,4 @@ google
 google-genai 
 python-dotenv
 flask
+fastapi

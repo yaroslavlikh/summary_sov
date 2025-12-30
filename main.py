@@ -1,5 +1,7 @@
 import telebot
-from flask import Flask, request
+from fastapi import FastAPI, Request
+from contextlib import asynccontextmanager
+
 import config
 from handlers.handlers import load_handlers
 from database.init_db import init_db
@@ -9,23 +11,25 @@ TOKEN = config.get_key_bot()
 bot = telebot.TeleBot(TOKEN)
 load_handlers(bot)
 
-app = Flask(__name__)
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    update = telebot.types.Update.de_json(
-        request.get_data().decode("utf-8")
-    )
-    bot.process_new_updates([update])
-    return "OK", 200
-
-
-
-@app.route("/")
-def index():
-    return "Bot is alive", 200
-
-
-if __name__ == "__main__":
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     init_db()
-    app.run(host="0.0.0.0", port=8080)
+    print("DB initialized")
+    yield
+    print("Shutdown")
+
+app = FastAPI(
+    title="SummarySov Bot",
+    lifespan=lifespan
+)
+
+@app.post("/webhook")
+async def telegram_webhook(request: Request):
+    data = await request.json()
+    update = telebot.types.Update.de_json(data)
+    bot.process_new_updates([update])
+    return {"ok": True}
+
+@app.get("/")
+def root():
+    return {"status": "bot is alive"}
