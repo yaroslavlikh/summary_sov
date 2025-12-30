@@ -1,45 +1,35 @@
 import telebot
-from fastapi import FastAPI, Request
-from contextlib import asynccontextmanager
-
-import config
+from config import get_key_bot
 from handlers.handlers import load_handlers
 from database.init_db import init_db
-import os
-import uvicorn
+
+def start_app(token):
+    try:
+        init_db()
+        print("База данных инициализирована")
+    except Exception as e:
+        print(f"Ошибка инициализации базы данных: {e}")
+        return
+    try:
+        bot = telebot.TeleBot(token=token)
+    except Exception as e:
+       print(f"Ошибка инициализации бота: {e}")
+       return
+    try:
+        load_handlers(bot)
+    except Exception as e:
+        print(f"Ошибка загрузки обработчиков: {e}")
+        return
+    try:
+        print("Бот работает...")
+        bot.infinity_polling()
+    except Exception as e:
+        print(f"Ошибка запуска бота: {e}")
 
 
-TOKEN = config.get_key_bot()
-
-bot = telebot.TeleBot(TOKEN)
-load_handlers(bot)
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    init_db()
-    print("DB initialized")
-    yield
-    print("Shutdown")
-
-app = FastAPI(
-    title="SummarySov Bot",
-    lifespan=lifespan
-)
-
-uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", 8080)),
-        log_level="info"
-    )
-
-@app.post("/webhook")
-async def telegram_webhook(request: Request):
-    data = await request.json()
-    update = telebot.types.Update.de_json(data)
-    bot.process_new_updates([update])
-    return {"ok": True}
-
-@app.get("/")
-def root():
-    return {"status": "bot is alive"}
+if __name__ == '__main__':
+    try:
+        token = get_key_bot()
+    except Exception as e:
+       print(f"Ошибка получения токена бота: {e}")
+    start_app(token)
