@@ -1,38 +1,28 @@
 import telebot
+from flask import Flask, request
 import config
 from handlers.handlers import load_handlers
 from database.init_db import init_db
 
-import requests
+TOKEN = config.get_key_bot()
+bot = telebot.TeleBot(TOKEN)
 
-import socket
-socket.setdefaulttimeout(30)
+app = Flask(__name__)
 
-print("TEST TELEGRAM CONNECT")
-print(requests.get("https://api.telegram.org").status_code)
+load_handlers(bot)
+init_db()
 
+@app.route("/")
+def health():
+    return "BOT IS RUNNING", 200
 
-def start_up():
-    try:
-        init_db()
+@app.route("/webhook", methods=["POST"])
+def telegram_webhook():
+    update = telebot.types.Update.de_json(
+        request.get_data(as_text=True)
+    )
+    bot.process_new_updates([update])
+    return "OK", 200
 
-        telebot.apihelper.SESSION = None
-        telebot.apihelper.API_URL = "https://api.telegram.org/bot{0}/{1}"
-        TELEGRAM_TOKEN = config.get_key_bot()
-        bot = telebot.TeleBot(TELEGRAM_TOKEN)
-
-        load_handlers(bot)
-
-        print("Бот запущен")
-        bot.infinity_polling(
-            timeout=60,
-            long_polling_timeout=60,
-            skip_pending=True
-        )
-
-
-    except Exception as e:
-        print(f"Ошибка запуска: {e}")
-
-if __name__ == '__main__':
-    start_up()
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080)
