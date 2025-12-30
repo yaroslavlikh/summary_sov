@@ -38,37 +38,46 @@ def load_handlers(bot):
         """
         bot.send_message(message.chat.id, help_text.strip())
 
-
     @bot.message_handler(commands=['summary'])
-    def summary(message, limit=100):
-        global counter
+    def summary(message):
         conn = sqlite3.connect('database/messages.sql')
         cursor = conn.cursor()
-        _ = message.text.split()
-        if len(_) > 1:
-            if _[1].isdigit():
-                limit = min(int(_[1]), int(cursor.execute("SELECT COUNT(*) FROM messages WHERE user_id = ?", (message.chat.id,)).fetchone()[0]))
 
-        print("Создание краткого содержания")
+        row = cursor.execute(
+            "SELECT last_id FROM summary_state WHERE user_id = ?",
+            (message.chat.id,)
+        ).fetchone()
 
-        cursor.execute("""SELECT user_name, message
-                    FROM (
-                        SELECT id, user_name, message
-                        FROM messages
-                        WHERE user_id = ?
-                        ORDER BY id DESC
-                        LIMIT ?
-                    )
-                    ORDER BY id ASC;""",
-                       (message.chat.id, limit))
+        last_id = row[0] if row else 0
+
+        cursor.execute("""
+            SELECT id, user_name, message
+            FROM messages
+            WHERE user_id = ? AND id > ?
+            ORDER BY id ASC
+        """, (message.chat.id, last_id))
+
         messages = cursor.fetchall()
+
+        if not messages:
+            bot.send_message(message.chat.id, "Нет новых сообщений для суммаризации")
+            conn.close()
+            return
+
+        prompt = ". ".join(f"{u}: {m}" for _, u, m in messages)
+
+        res = send_prompt(prompt)
+
+        # сохраняем последний id
+        last_msg_id = messages[-1][0]
+
+        cursor.execute("""
+            INSERT INTO summary_state (user_id, last_id)
+            VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET last_id = excluded.last_id
+        """, (message.chat.id, last_msg_id))
+
+        conn.commit()
         conn.close()
-        prompt = ". ".join([f"{msg[0]}: {msg[1]}" for msg in messages])
-        print(prompt)
-        try:
-            res = f"{send_prompt(prompt)}\nИ напоминание от нашей компании Google: Гордей хуесос"
-        except Exception as e:
-            print(f"Ошибка при суммаризации: {e}")
-            res = "Произошла ошибка при суммаризации ваших сообщений. Попробуйте позже"
-        
+
         bot.send_message(message.chat.id, res)
