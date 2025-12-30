@@ -18,7 +18,6 @@ def load_handlers(bot):
             cursor.execute("INSERT INTO messages (user_id, user_name, message) VALUES (?, ?, ?)",
                         (message.chat.id, user_name, message.text))
             conn.commit()
-            print(message.chat.id)
             if counter == 150:
                 summary(message)
             conn.close()
@@ -41,7 +40,7 @@ def load_handlers(bot):
 
 
     @bot.message_handler(commands=['summary'])
-    def summary(message, limit: str = 150):
+    def summary(message, limit=100):
         global counter
         conn = sqlite3.connect('database/messages.sql')
         cursor = conn.cursor()
@@ -59,5 +58,10 @@ def load_handlers(bot):
         messages = cursor.fetchall()
         conn.close()
         prompt = ". ".join([f"{msg[0]}: {msg[1]}" for msg in messages])
-        res = f"{send_promte(prompt)}\n - Ну и Гордей хуесос"
+        try:
+            res = f"{send_promte(prompt)}\nИ напоминание от нашей компании Google: Гордей хуесос"
+        except Exception as e:
+            print(f"Ошибка при суммаризации: {e}")
+            res = "Произошла ошибка при суммаризации ваших сообщений. Попробуйте позже"
+        
         bot.send_message(message.chat.id, res)
