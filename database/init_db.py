@@ -8,7 +8,8 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
             user_name TEXT NOT NULL,
-            message TEXT NOT NULL
+            message TEXT NOT NULL,
+            last_id INTEGER DEFAULT 0
         );""")
     conn.commit()
     conn.close()
