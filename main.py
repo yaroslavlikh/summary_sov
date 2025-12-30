@@ -4,7 +4,7 @@ import config
 from handlers.handlers import load_handlers
 
 TOKEN = config.get_key_bot()
-WEBHOOK_URL = config.get_webhook_url()
+WEBHOOK_URL = config.get_flask_url()
 
 bot = telebot.TeleBot(TOKEN)
 load_handlers(bot)
