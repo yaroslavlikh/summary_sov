@@ -1,6 +1,6 @@
 import sqlite3
-from llm.gemini import send_promte
-#from llm.llama import send_promte
+from llm.gemini import send_prompt
+#from llm.llama import send_prompt
 counter = 0
 
 def load_handlers(bot):
@@ -30,7 +30,7 @@ def load_handlers(bot):
 
         /summary [количество] - Создать краткое содержание последних сообщений
         Пример: /summary 50 - создаст краткое содержание последних 50 сообщений
-        По умолчанию: 150 сообщений
+        По умолчанию: 100 сообщений
 
         /help - Показать это сообщение
 
@@ -59,7 +59,7 @@ def load_handlers(bot):
         conn.close()
         prompt = ". ".join([f"{msg[0]}: {msg[1]}" for msg in messages])
         try:
-            res = f"{send_promte(prompt)}\nИ напоминание от нашей компании Google: Гордей хуесос"
+            res = f"{send_prompt(prompt)}\nИ напоминание от нашей компании Google: Гордей хуесос"
         except Exception as e:
             print(f"Ошибка при суммаризации: {e}")
             res = "Произошла ошибка при суммаризации ваших сообщений. Попробуйте позже"
