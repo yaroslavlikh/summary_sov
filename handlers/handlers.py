@@ -52,14 +52,14 @@ def load_handlers(bot):
         print("Создание краткого содержания")
 
         cursor.execute("""SELECT user_name, message
-                        FROM (
-                            SELECT id, user_name, message
-                            FROM messages
-                            WHERE user_id = ?
-                            ORDER BY id DESC
-                            LIMIT ?
-                        )
-                        ORDER BY id ASC;""",
+                    FROM (
+                        SELECT id, user_name, message
+                        FROM messages
+                        WHERE user_id = ?
+                        ORDER BY id DESC
+                        LIMIT ?
+                    )
+                    ORDER BY id ASC;""",
                        (message.chat.id, limit))
         messages = cursor.fetchall()
         conn.close()
