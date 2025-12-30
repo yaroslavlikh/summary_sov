@@ -53,7 +53,7 @@ def load_handlers(bot):
 
         cursor.execute("""SELECT user_name, message
                         FROM (
-                            SELECT user_name, message
+                            SELECT id, user_name, message
                             FROM messages
                             WHERE user_id = ?
                             ORDER BY id DESC
