@@ -68,7 +68,6 @@ def load_handlers(bot):
 
         res = send_prompt(prompt)
 
-        # сохраняем последний id
         last_msg_id = messages[-1][0]
 
         cursor.execute("""
@@ -79,5 +78,7 @@ def load_handlers(bot):
 
         conn.commit()
         conn.close()
-
+        print("last_id =", last_id)
+        print("найдено сообщений:", len(messages))
+        print(messages)
         bot.send_message(message.chat.id, res)
