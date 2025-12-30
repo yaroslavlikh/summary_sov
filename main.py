@@ -5,6 +5,9 @@ from contextlib import asynccontextmanager
 import config
 from handlers.handlers import load_handlers
 from database.init_db import init_db
+import os
+import uvicorn
+
 
 TOKEN = config.get_key_bot()
 
@@ -22,6 +25,9 @@ app = FastAPI(
     title="SummarySov Bot",
     lifespan=lifespan
 )
+
+port = int(os.environ.get("PORT", 8080))
+uvicorn.run(app, host="0.0.0.0", port=port)
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
