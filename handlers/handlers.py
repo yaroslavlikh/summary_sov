@@ -6,7 +6,7 @@ counter = 0
 def load_handlers(bot):
     global counter
 
-    @bot.message_handler(func=lambda mess: not mess.text[0] == "/" and mess.content_type == 'text')
+    @bot.message_handler(func=lambda mess: mess.text and not mess.text.startswith("/"))
     def save_messages(message):
         global counter
         if message.from_user.username != "sglypa_tg_bot":

@@ -13,12 +13,12 @@ app = Flask(__name__)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    if request.headers.get("content-type") == "application/json":
-        json_string = request.get_data().decode("utf-8")
-        update = telebot.types.Update.de_json(json_string)
-        bot.process_new_updates([update])
-        return "OK", 200
-    return "Unsupported Media Type", 415
+    update = telebot.types.Update.de_json(
+        request.get_data().decode("utf-8")
+    )
+    bot.process_new_updates([update])
+    return "OK", 200
+
 
 
 @app.route("/")
