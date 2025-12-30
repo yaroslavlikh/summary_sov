@@ -2,4 +2,4 @@ pyTelegramBotAPI
 requests
 google
 google-genai 
-dotenv
+python-dotenv
