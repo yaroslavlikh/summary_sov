@@ -4,7 +4,6 @@ from llm.prompt import prompt_for_llm
 
 API_key = get_token_gemini()
 
-
 def send_prompt(prompt):
     client = genai.Client(api_key=API_key)
     new = ""
@@ -18,7 +17,7 @@ def send_prompt(prompt):
             flag = True
             new = "Новая версия модели недоступна, перешел на старую"
         response = client.models.generate_content(
-        model="gemini-1.5-flash", contents=prompt_for_llm + prompt
+        model="gemini-lite", contents=prompt_for_llm + prompt
         )
     print(response.text)
     if new: return f'{new}\n{response.text}'
