@@ -19,7 +19,6 @@ def send_prompt(prompt):
         response = client.models.generate_content(
         model="gemini-3-flash-preview", contents=prompt_for_llm + prompt
         )
-    print(response.text)
     if new: return f'{new}\n{response.text}'
     else: return response.text
 
