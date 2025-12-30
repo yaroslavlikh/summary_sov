@@ -1,28 +1,28 @@
 import telebot
-from flask import Flask, request
 import config
 from handlers.handlers import load_handlers
 from database.init_db import init_db
 
-TOKEN = config.get_key_bot()
-bot = telebot.TeleBot(TOKEN)
+def start_up():
+    try:
+        init_db()
 
-app = Flask(__name__)
+        TELEGRAM_TOKEN = config.get_key_bot()
+        bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-load_handlers(bot)
-init_db()
+        load_handlers(bot)
 
-@app.route("/")
-def health():
-    return "BOT IS RUNNING", 200
+        print("Бот запущен")
+        bot.remove_webhook()
+        bot.infinity_polling(
+            timeout=60,
+            long_polling_timeout=60,
+            skip_pending=True
+        )
 
-@app.route("/webhook", methods=["POST"])
-def telegram_webhook():
-    update = telebot.types.Update.de_json(
-        request.get_data(as_text=True)
-    )
-    bot.process_new_updates([update])
-    return "OK", 200
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    except Exception as e:
+        print(f"Ошибка запуска: {e}")
+
+if __name__ == '__main__':
+    start_up()
