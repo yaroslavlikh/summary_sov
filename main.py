@@ -13,7 +13,12 @@ def start_up():
         load_handlers(bot)
 
         print("Бот запущен")
-        bot.infinity_polling(timeout=20, long_polling_timeout=20)
+        bot.infinity_polling(
+            timeout=60,
+            long_polling_timeout=60,
+            skip_pending=True
+        )
+
 
     except Exception as e:
         print(f"Ошибка запуска: {e}")
