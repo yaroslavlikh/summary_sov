@@ -22,7 +22,7 @@ def start_app(token):
         return
     try:
         print("Бот работает...")
-        bot.infinity_polling()
+        bot.polling()
     except Exception as e:
         print(f"Ошибка запуска бота: {e}")
 
