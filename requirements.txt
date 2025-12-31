@@ -4,4 +4,3 @@ google
 google-genai 
 python-dotenv
 urllib3
-socket
