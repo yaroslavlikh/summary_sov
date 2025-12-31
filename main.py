@@ -9,14 +9,6 @@ import socket
 # Отключаем IPv6
 urllib3.util.connection.HAS_IPV6 = False
 
-# Проверка (опционально)
-try:
-    socket.create_connection(("api.telegram.org", 443), timeout=5)
-except Exception as e:
-    print("FATAL: No internet access in Railway container:", e)
-    exit(1)
-
-
 init_db()
 token = get_key_bot()
 bot = telebot.TeleBot(token=token)
