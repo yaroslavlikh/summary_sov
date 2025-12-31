@@ -3,6 +3,5 @@ requests
 google
 google-genai 
 python-dotenv
-flask
-fastapi
-uvicorn
+urllib3
+socket
