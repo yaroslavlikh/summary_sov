@@ -40,45 +40,28 @@ def load_handlers(bot):
 
     @bot.message_handler(commands=['summary'])
     def summary(message):
+        N = 100  # количество последних сообщений для суммаризации
+
         conn = sqlite3.connect('database/messages.sql')
         cursor = conn.cursor()
 
-        row = cursor.execute(
-            "SELECT last_id FROM summary_state WHERE user_id = ?",
-            (message.chat.id,)
-        ).fetchone()
-
-        last_id = row[0] if row else 0
-
         cursor.execute("""
-            SELECT id, user_name, message
+            SELECT user_name, message
             FROM messages
-            WHERE user_id = ? AND id > ?
-            ORDER BY id ASC
-        """, (message.chat.id, last_id))
+            WHERE user_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+        """, (message.chat.id, N))
 
-        messages = cursor.fetchall()
+        messages = cursor.fetchall()[::-1]  # обращаем обратно в хронологический порядок
+
+        conn.close()
 
         if not messages:
-            bot.send_message(message.chat.id, "Нет новых сообщений для суммаризации")
-            conn.close()
+            bot.send_message(message.chat.id, "Нет сообщений для суммаризации")
             return
 
-        prompt = ". ".join(f"{u}: {m}" for _, u, m in messages)
-
+        prompt = ". ".join(f"{u}: {m}" for u, m in messages)
         res = send_prompt(prompt)
 
-        last_msg_id = messages[-1][0]
-
-        cursor.execute("""
-            INSERT INTO summary_state (user_id, last_id)
-            VALUES (?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET last_id = excluded.last_id
-        """, (message.chat.id, last_msg_id))
-
-        conn.commit()
-        conn.close()
-        print("last_id =", last_id)
-        print("найдено сообщений:", len(messages))
-        print(messages)
         bot.send_message(message.chat.id, res)
