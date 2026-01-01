@@ -4,7 +4,6 @@ from llm.gemini import send_prompt
 counter = 0
 
 def load_handlers(bot):
-    global counter
 
     @bot.message_handler(func=lambda mess: mess.text and not mess.text.startswith("/"))
     def save_messages(message):
@@ -19,9 +18,8 @@ def load_handlers(bot):
                         (message.chat.id, user_name, message.text))
             conn.commit()
             if counter == 150:
-                summary(message)
+                summary("/summary 150")
             conn.close()
-
 
     @bot.message_handler(commands=['help'])
     def help_command(message):
@@ -40,12 +38,18 @@ def load_handlers(bot):
 
     @bot.message_handler(commands=['summary'])
     def summary(message):
+        global counter
         N = 100
-        if len(message.text.split()) > 1:
-            _ = message.text.split()[1]
-            if _.isdigit():
-                N = _
-        
+        if counter < 10:
+            bot.send_message(message.chat.id, "Сообщений было написано слишком мало для суммаризации")
+
+        else:
+            N = 100
+            if len(message.text.split()) > 1:
+                _ = message.text.split()[1]
+                if _.isdigit():
+                    N = _
+                    
         conn = sqlite3.connect('database/messages.sql')
         cursor = conn.cursor()
 
@@ -57,7 +61,7 @@ def load_handlers(bot):
             LIMIT ?
         """, (message.chat.id, N))
 
-        messages = cursor.fetchall()[::-1]  # обращаем обратно в хронологический порядок
+        messages = cursor.fetchall()[::-1] 
 
         conn.close()
 
@@ -67,5 +71,5 @@ def load_handlers(bot):
 
         prompt = ". ".join(f"{u}: {m}" for u, m in messages)
         res = send_prompt(prompt)
-
+        counter = 0
         bot.send_message(message.chat.id, res)
