@@ -59,6 +59,7 @@ def load_handlers(bot):
             _ = message.text.split()[1]
             if _.isdigit():
                 N = int(_)
+                
         if N <= 10:
             bot.send_message(message.chat.id, f"Сообщений было написано слишком мало для суммаризации: {N}")
         else:
