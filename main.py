@@ -9,9 +9,32 @@ import socket
 # Отключаем IPv6
 urllib3.util.connection.HAS_IPV6 = False
 
-init_db()
-token = get_key_bot()
-bot = telebot.TeleBot(token=token)
-load_handlers(bot)
-print("Бот запущен...")
-bot.polling()
+def start_app():
+    try:
+        init_db()
+    except Exception as e:
+        print(f"Ошибка инициализации базы данных: {e}")
+        return
+    try:
+        token = get_key_bot()
+    except Exception as e:
+        print(f"Ошибка получения токена бота: {e}")
+        return
+    try:
+        bot = telebot.TeleBot(token=token)
+    except Exception as e:
+        print(f"Ошибка создания бота: {e}")
+        return  
+    try:
+        load_handlers(bot)
+    except Exception as e:
+        print(f"Ошибка загрузки обработчиков: {e}")
+        return
+    try:
+        print("Бот запущен...")
+        bot.polling()
+    except Exception as e:
+        print(f"Ошибка при запуске бота: {e}")
+
+if __name__ == "__main__":
+    start_app()
