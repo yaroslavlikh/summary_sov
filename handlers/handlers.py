@@ -2,6 +2,7 @@ import sqlite3
 from llm.gemini import send_prompt
 #from llm.llama import send_prompt
 counter = 0
+last_summary_id = 0
 
 def load_handlers(bot):
     global counter
@@ -30,7 +31,7 @@ def load_handlers(bot):
 
         /summary [количество] - Создать краткое содержание последних сообщений
         Пример: /summary 50 - создаст краткое содержание последних 50 сообщений
-        По умолчанию: 100 сообщений
+        По умолчанию: с последнего саммари
 
         /help - Показать это сообщение
 
@@ -38,34 +39,44 @@ def load_handlers(bot):
         """
         bot.send_message(message.chat.id, help_text.strip())
 
+    def get_last_summary_id(user_id):
+        conn = sqlite3.connect('database/messages.sql')
+        cursor = conn.cursor()
+        cursor.execute("SELECT last_id FROM messages WHERE user_id = ? ORDER BY id DESC LIMIT 1", (user_id,))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else 0
+
     @bot.message_handler(commands=['summary'])
     def summary(message):
-        N = 100
+        global last_summary_id, counter
+        conn = sqlite3.connect('database/messages.sql')
+        cursor = conn.cursor()
+        now_id_message = cursor.execute("SELECT id FROM messages WHERE user_id = ? ORDER BY id DESC LIMIT 1", (message.chat.id,)).fetchone()[0]
+        N = now_id_message - last_summary_id
+        last_summary_id = now_id_message
         if len(message.text.split()) > 1:
             _ = message.text.split()[1]
             if _.isdigit():
-                N = _
-        
-        conn = sqlite3.connect('database/messages.sql')
-        cursor = conn.cursor()
+                N = int(_)
+        if N <= 10:
+            bot.send_message(message.chat.id, f"Сообщений было написано слишком мало для суммаризации: {N}")
+        else:
+            cursor.execute("""
+                SELECT user_name, message
+                FROM messages
+                WHERE user_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+            """, (message.chat.id, N))
 
-        cursor.execute("""
-            SELECT user_name, message
-            FROM messages
-            WHERE user_id = ?
-            ORDER BY id DESC
-            LIMIT ?
-        """, (message.chat.id, N))
-
-        messages = cursor.fetchall()[::-1]  # обращаем обратно в хронологический порядок
-
+            messages = cursor.fetchall()[::-1]
+            if not messages:
+                bot.send_message(message.chat.id, "Нет сообщений для суммаризации")
+                return
+            prompt = ". ".join(f"{u}: {m}" for u, m in messages)
+            res = send_prompt(prompt)
+            counter = 0
+            bot.send_message(message.chat.id, res)
         conn.close()
 
-        if not messages:
-            bot.send_message(message.chat.id, "Нет сообщений для суммаризации")
-            return
-
-        prompt = ". ".join(f"{u}: {m}" for u, m in messages)
-        res = send_prompt(prompt)
-
-        bot.send_message(message.chat.id, res)
