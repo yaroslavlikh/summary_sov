@@ -4,9 +4,6 @@ from handlers.handlers import load_handlers
 from database.init_db import init_db
 
 import urllib3
-import socket
-
-# Отключаем IPv6
 urllib3.util.connection.HAS_IPV6 = False
 
 def start_app():
