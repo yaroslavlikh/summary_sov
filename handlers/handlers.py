@@ -52,7 +52,6 @@ def load_handlers(bot):
         cursor = conn.cursor()
         now_id_message = cursor.execute("SELECT id FROM messages WHERE user_id = ? ORDER BY id DESC LIMIT 1", (message.chat.id,)).fetchone()[0]
         N = now_id_message - last_summary_id
-        last_summary_id = now_id_message
         if len(message.text.split()) > 1:
             _ = message.text.split()[1]
             if _.isdigit():
@@ -60,7 +59,11 @@ def load_handlers(bot):
                 
         if N <= 10:
             bot.send_message(message.chat.id, f"Сообщений было написано слишком мало для суммаризации: {N}")
+
         else:
+
+            last_summary_id = now_id_message
+            counter = 0
             cursor.execute("""
                 SELECT user_name, message
                 FROM messages
@@ -75,6 +78,5 @@ def load_handlers(bot):
                 return
             prompt = ". ".join(f"{u}: {m}" for u, m in messages)
             res = send_prompt(prompt)
-            counter = 0
             bot.send_message(message.chat.id, res)
         conn.close()
