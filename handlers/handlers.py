@@ -40,8 +40,12 @@ def load_handlers(bot):
 
     @bot.message_handler(commands=['summary'])
     def summary(message):
-        N = 100  # количество последних сообщений для суммаризации
-
+        N = 100
+        if len(message.text.split()) > 1:
+            _ = message.text.split()[1]
+            if _.isdigit():
+                N = _
+        
         conn = sqlite3.connect('database/messages.sql')
         cursor = conn.cursor()
 
