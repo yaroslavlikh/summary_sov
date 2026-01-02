@@ -11,5 +11,11 @@ def init_db():
             message TEXT NOT NULL,
             last_id INTEGER DEFAULT 0
         );""")
+    
+    try:
+        cursor.execute("ALTER TABLE messages ADD COLUMN replied_message TEXT DEFAULT NULL;")
+    except sqlite3.OperationalError:
+        pass
+    
     conn.commit()
     conn.close()
