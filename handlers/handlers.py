@@ -56,14 +56,12 @@ def load_handlers(bot):
             _ = message.text.split()[1]
             if _.isdigit():
                 N = int(_)
+                print(f"Пользователь запросил суммаризацию последних {N} сообщений")
                 
         if N <= 10:
             bot.send_message(message.chat.id, f"Сообщений было написано слишком мало для суммаризации: {N}")
 
         else:
-
-            last_summary_id = now_id_message
-            counter = 0
             cursor.execute("""
                 SELECT user_name, message
                 FROM messages
@@ -77,6 +75,11 @@ def load_handlers(bot):
                 bot.send_message(message.chat.id, "Нет сообщений для суммаризации")
                 return
             prompt = ". ".join(f"{u}: {m}" for u, m in messages)
-            res = send_prompt(prompt)
+            res = send_prompt(prompt) + "\n\n И напоминание от нашей компании Google: Гордей долбаеб"
+            if not res:
+                bot.send_message(message.chat.id, "Gemini решил послать вас с ответом\n\n Но мы все равно сделаем напоминание от нашей компании Google: Гордей долбаеб")
+                return
+            last_summary_id = now_id_message
+            counter = 0
             bot.send_message(message.chat.id, res)
         conn.close()
