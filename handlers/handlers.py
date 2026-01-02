@@ -1,11 +1,9 @@
 import sqlite3
 from llm.gemini import send_prompt
-#from llm.llama import send_prompt
 counter = 0
 last_summary_id = 0
 
 def load_handlers(bot):
-    global counter
 
     @bot.message_handler(func=lambda mess: mess.text and not mess.text.startswith("/"))
     def save_messages(message):
@@ -20,9 +18,8 @@ def load_handlers(bot):
                         (message.chat.id, user_name, message.text))
             conn.commit()
             if counter == 150:
-                summary(message)
+                summary("/summary 150")
             conn.close()
-
 
     @bot.message_handler(commands=['help'])
     def help_command(message):
@@ -54,15 +51,23 @@ def load_handlers(bot):
         cursor = conn.cursor()
         now_id_message = cursor.execute("SELECT id FROM messages WHERE user_id = ? ORDER BY id DESC LIMIT 1", (message.chat.id,)).fetchone()[0]
         N = now_id_message - last_summary_id
-        if len(message.text.split()) > 1:
-            _ = message.text.split()[1]
+        dt = message.text.split()
+        if len(dt) > 1:
+            _ = dt[1]
             if _.isdigit():
                 N = int(_)
+                print(f"Пользователь запросил суммаризацию последних {N} сообщений")
                 
         if N <= 10:
             bot.send_message(message.chat.id, f"Сообщений было написано слишком мало для суммаризации: {N}")
 
         else:
+            M = 18
+            if len(dt) > 2:
+                _ = dt[2]
+                if _.isdigit():
+                    M = int(_)
+                    print(f"Пользователь запросил суммаризацию в размере {M} сообщений")
 
             last_summary_id = now_id_message
             counter = 0
@@ -79,7 +84,12 @@ def load_handlers(bot):
                 bot.send_message(message.chat.id, "Нет сообщений для суммаризации")
                 return
             prompt = ". ".join(f"{u}: {m}" for u, m in messages)
-            res = send_prompt(prompt)
+
+            res = send_prompt(f'Ответ от тебя должен быть в {M} строк. {prompt}') + "\n\n И напоминание от нашей компании Google: Гордей долбаеб"
+            if not res:
+                bot.send_message(message.chat.id, "Gemini решил послать вас с ответом\n\n Но мы все равно сделаем напоминание от нашей компании Google: Гордей долбаеб")
+                return
+            last_summary_id = now_id_message
+            counter = 0
             bot.send_message(message.chat.id, res)
         conn.close()
-
