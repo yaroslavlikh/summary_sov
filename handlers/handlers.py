@@ -67,7 +67,7 @@ def load_handlers(bot):
                 _ = dt[2]
                 if _.isdigit():
                     M = int(_)
-                    print(f"Пользователь запросил суммаризацию в размере {M} сообщений")
+                    print(f"Пользователь запросил суммаризацию в размере {M} строк")
 
             last_summary_id = now_id_message
             counter = 0
@@ -85,7 +85,7 @@ def load_handlers(bot):
                 return
             prompt = ". ".join(f"{u}: {m}" for u, m in messages)
 
-            res = send_prompt(f'Ответ от тебя должен быть в {M} строк. {prompt}') + "\n\n И напоминание от нашей компании Google: Гордей долбаеб"
+            res = send_prompt(f'Ответ от тебя должен быть максимум в {M} строк. {prompt}') + "\n\n И напоминание от нашей компании Google: Гордей долбаеб"
             if not res:
                 bot.send_message(message.chat.id, "Gemini решил послать вас с ответом\n\n Но мы все равно сделаем напоминание от нашей компании Google: Гордей долбаеб")
                 return
