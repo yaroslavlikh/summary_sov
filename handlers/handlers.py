@@ -51,7 +51,14 @@ def load_handlers(bot):
         global last_summary_id, counter
         conn = sqlite3.connect('database/messages.sql')
         cursor = conn.cursor()
-        now_id_message = cursor.execute("SELECT id FROM messages WHERE user_id = ? ORDER BY id DESC LIMIT 1", (message.chat.id,)).fetchone()[0]
+        now_id_message = cursor.execute("SELECT id FROM messages WHERE user_id = ? ORDER BY id DESC LIMIT 1", (message.chat.id,)).fetchone()
+        if now_id_message is not None:
+            now_id_message = now_id_message[0]
+        else:
+            bot.send_message(message.chat.id, "У вас нет сообщений для суммаризации.")
+            conn.close()
+            return
+
         N = now_id_message - last_summary_id
         dt = message.text.split()
         if len(dt) > 1:
