@@ -86,7 +86,10 @@ def load_handlers(bot):
             if not messages:
                 bot.send_message(message.chat.id, "Нет сообщений для суммаризации")
                 return
-            prompt = ". ".join(f"{u}: {m} ответил на сообщение {n}" for u, m, n in messages)
+            try:
+                prompt = ". ".join(f"{u}: {m} ответил на сообщение {n}" for u, m, n in messages)
+            except Exception as e:
+                print(f"Ошибка при формировании prompt: {e}\nФормирую prompt без replied_message")
 
             res = send_prompt(f'Cожми информацию для ответа максимум в {M} строк. {prompt}') + "\n\n И напоминание от нашей компании Google: Гордей долбаеб"
             if not res:
