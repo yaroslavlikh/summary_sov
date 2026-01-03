@@ -94,5 +94,5 @@ def load_handlers(bot):
                 return
             last_summary_id = now_id_message
             counter = 0
-            bot.send_message(message.chat.id, res)
+            bot.send_message(message.chat.id, f'#summary\n\n{res}')
         conn.close()
