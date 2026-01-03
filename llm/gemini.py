@@ -8,10 +8,10 @@ def send_prompt(prompt):
     client = genai.Client(api_key=API_key)
     new = ""
     try:
+        flag = True
         response = client.models.generate_content(
         model="gemini-flash-latest", contents=prompt_for_llm + prompt
         )
-        flag = True
     except Exception as e:
         if flag:
             flag = False
