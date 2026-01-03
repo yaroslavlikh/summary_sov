@@ -10,12 +10,14 @@ def load_handlers(bot):
         global counter
         if message.from_user.username != "sglypa_tg_bot":
             print(f"Получено сообщение: {message.text}")
+            reply_message = message.reply_to_message
+            replied_text = reply_message.text if reply_message else "Отмеченного сообщения нет"
             user_name = message.from_user.first_name
             counter += 1
             conn = sqlite3.connect('database/messages.sql')
             cursor = conn.cursor()
-            cursor.execute("INSERT INTO messages (user_id, user_name, message) VALUES (?, ?, ?)",
-                        (message.chat.id, user_name, message.text))
+            cursor.execute("INSERT INTO messages (user_id, user_name, message, replied_message) VALUES (?, ?, ?, ?)",
+                        (message.chat.id, user_name, message.text, replied_text))
             conn.commit()
             if counter == 150:
                 summary("/summary 150")
@@ -71,8 +73,9 @@ def load_handlers(bot):
 
             last_summary_id = now_id_message
             counter = 0
+
             cursor.execute("""
-                SELECT user_name, message
+                SELECT user_name, message, replied_message
                 FROM messages
                 WHERE user_id = ?
                 ORDER BY id DESC
@@ -83,9 +86,9 @@ def load_handlers(bot):
             if not messages:
                 bot.send_message(message.chat.id, "Нет сообщений для суммаризации")
                 return
-            prompt = ". ".join(f"{u}: {m}" for u, m in messages)
+            prompt = ". ".join(f"{u}: {m} ответил на сообщение {n}" for u, m, n in messages)
 
-            res = send_prompt(f'Ответ от тебя должен быть максимум в {M} строк. {prompt}') + "\n\n И напоминание от нашей компании Google: Гордей долбаеб"
+            res = send_prompt(f'Cожми информацию для ответа максимум в {M} строк. {prompt}') + "\n\n И напоминание от нашей компании Google: Гордей долбаеб"
             if not res:
                 bot.send_message(message.chat.id, "Gemini решил послать вас с ответом\n\n Но мы все равно сделаем напоминание от нашей компании Google: Гордей долбаеб")
                 return
