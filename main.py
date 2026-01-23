@@ -14,6 +14,9 @@ def start_app():
         return
     try:
         token = get_key_bot()
+        if not token:
+            print("Ошибка: BOT_TOKEN не найден. Проверьте файл .env")
+            return
     except Exception as e:
         print(f"Ошибка получения токена бота: {e}")
         return
