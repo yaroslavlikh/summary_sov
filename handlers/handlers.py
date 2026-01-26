@@ -8,20 +8,23 @@ def load_handlers(bot):
     @bot.message_handler(func=lambda mess: mess.text and not mess.text.startswith("/"))
     def save_messages(message):
         global counter
-        if message.from_user.username != "sglypa_tg_bot":
-            print(f"Получено сообщение: {message.text}")
-            reply_message = message.reply_to_message
-            replied_text = reply_message.text if reply_message else "Отмеченного сообщения нет"
-            user_name = message.from_user.first_name
-            counter += 1
-            conn = sqlite3.connect('database/messages.sql')
-            cursor = conn.cursor()
-            cursor.execute("INSERT INTO messages (user_id, user_name, message, replied_message) VALUES (?, ?, ?, ?)",
-                        (message.chat.id, user_name, message.text, replied_text))
-            conn.commit()
-            if counter == 150:
-                summary("/summary 150")
-            conn.close()
+        try:
+            if message.from_user.username != "sglypa_tg_bot":
+                print(f"Получено сообщение: {message.text}")
+                reply_message = message.reply_to_message
+                replied_text = reply_message.text if reply_message else "Отмеченного сообщения нет"
+                user_name = message.from_user.first_name
+                counter += 1
+                conn = sqlite3.connect('database/messages.sql')
+                cursor = conn.cursor()
+                cursor.execute("INSERT INTO messages (user_id, user_name, message, replied_message) VALUES (?, ?, ?, ?)",
+                            (message.chat.id, user_name, message.text, replied_text))
+                conn.commit()
+                if counter == 150:
+                    summary("/summary 150")
+                conn.close()
+        except Exception as e:
+            print(f"Ошибка при сохранении сообщения: {e}")
 
     @bot.message_handler(commands=['help'])
     def help_command(message):
