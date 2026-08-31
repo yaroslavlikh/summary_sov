@@ -5,7 +5,6 @@ from database.db import get_conn
 from llm.groq_client import send_prompt
 
 IGNORED_USERNAME = "sglypa_tg_bot"
-GOOGLE_REMINDER = "И напоминание от нашей компании Google: Гордей долбаеб"
 
 
 def get_chat_ids():
@@ -113,17 +112,14 @@ def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18):
 
         res = send_prompt(prompt_body, max_lines=requested_m)
         if not res:
-            bot.send_message(
-                chat_id,
-                "LLM решил послать вас с ответом\n\nНо мы всё равно сделаем напоминание от нашей компании Google: Гордей долбаеб",
-            )
+            bot.send_message(chat_id, "LLM решил послать вас с ответом")
             return
 
         set_last_summary_msg_id(cursor, chat_id, newest_included_id)
         conn.commit()
 
     formatted = format_summary_html(res, legend)
-    bot.send_message(chat_id, f'#summary\n\n{formatted}\n\n{GOOGLE_REMINDER}', parse_mode='HTML')
+    bot.send_message(chat_id, f'#summary\n\n{formatted}', parse_mode='HTML')
 
 
 def load_handlers(bot):
