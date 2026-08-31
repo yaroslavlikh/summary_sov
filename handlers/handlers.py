@@ -3,7 +3,13 @@ import re
 
 from database.db import get_conn
 from llm.groq_client import send_prompt
-from mention_groups import MENTION_GROUPS
+from mention_groups import (
+    add_to_group,
+    delete_group,
+    get_group,
+    list_groups,
+    remove_from_group,
+)
 
 IGNORED_USERNAME = "sglypa_tg_bot"
 
@@ -147,15 +153,19 @@ def load_handlers(bot):
 
     @bot.message_handler(commands=['help'])
     def help_command(message):
-        groups_list = ", ".join(f"/{name}" for name in MENTION_GROUPS)
-        help_text = f"""
+        help_text = """
         Доступные команды:
 
         /summary [количество] [строк] - Создать краткое содержание последних сообщений
         Пример: /summary 50 - создаст краткое содержание последних 50 сообщений
         По умолчанию: все сообщения с последнего вызова /summary
 
-        {groups_list} - позвать всех из соответствующей группы
+        /ping <группа> - позвать всех из группы
+        /groups - список групп в этом чате
+        /creategroup <группа> @user1 @user2 ... - создать новую группу
+        /addto <группа> @user1 @user2 ... - добавить в группу
+        /removefrom <группа> @user1 @user2 ... - убрать из группы
+        /deletegroup <группа> - удалить группу целиком
 
         /help - Показать это сообщение
 
@@ -164,13 +174,76 @@ def load_handlers(bot):
         """
         bot.send_message(message.chat.id, help_text.strip())
 
-    @bot.message_handler(commands=list(MENTION_GROUPS.keys()))
-    def mention_group(message):
-        group = message.text.split()[0][1:].split('@')[0]
-        usernames = MENTION_GROUPS.get(group)
-        if not usernames:
+    @bot.message_handler(commands=['ping'])
+    def ping_group(message):
+        dt = message.text.split()
+        if len(dt) < 2:
+            bot.send_message(message.chat.id, "Укажи группу: /ping <имя>")
             return
-        bot.send_message(message.chat.id, f"{group}: {' '.join(usernames)}")
+
+        name = dt[1]
+        usernames = get_group(message.chat.id, name)
+        if not usernames:
+            bot.send_message(message.chat.id, f"Нет такой группы: {name}")
+            return
+
+        bot.send_message(message.chat.id, f"{name}: {' '.join(usernames)}")
+
+    @bot.message_handler(commands=['groups'])
+    def groups_list(message):
+        groups = list_groups(message.chat.id)
+        if not groups:
+            bot.send_message(message.chat.id, "Групп пока нет")
+            return
+        bot.send_message(message.chat.id, ", ".join(f"{name} ({count})" for name, count in groups))
+
+    @bot.message_handler(commands=['creategroup'])
+    def create_group_cmd(message):
+        dt = message.text.split()
+        if len(dt) < 3:
+            bot.send_message(message.chat.id, "Формат: /creategroup <группа> @user1 @user2 ...")
+            return
+
+        name, usernames = dt[1], dt[2:]
+        if get_group(message.chat.id, name):
+            bot.send_message(message.chat.id, f'Группа "{name}" уже существует, используй /addto')
+            return
+
+        add_to_group(message.chat.id, name, usernames)
+        bot.send_message(message.chat.id, f'Группа "{name}" создана: {" ".join(get_group(message.chat.id, name))}')
+
+    @bot.message_handler(commands=['addto'])
+    def add_to_group_cmd(message):
+        dt = message.text.split()
+        if len(dt) < 3:
+            bot.send_message(message.chat.id, "Формат: /addto <группа> @user1 @user2 ...")
+            return
+
+        name, usernames = dt[1], dt[2:]
+        add_to_group(message.chat.id, name, usernames)
+        bot.send_message(message.chat.id, f'Добавлено в "{name}": {" ".join(usernames)}')
+
+    @bot.message_handler(commands=['removefrom'])
+    def remove_from_group_cmd(message):
+        dt = message.text.split()
+        if len(dt) < 3:
+            bot.send_message(message.chat.id, "Формат: /removefrom <группа> @user1 @user2 ...")
+            return
+
+        name, usernames = dt[1], dt[2:]
+        remove_from_group(message.chat.id, name, usernames)
+        bot.send_message(message.chat.id, f'Удалено из "{name}": {" ".join(usernames)}')
+
+    @bot.message_handler(commands=['deletegroup'])
+    def delete_group_cmd(message):
+        dt = message.text.split()
+        if len(dt) < 2:
+            bot.send_message(message.chat.id, "Формат: /deletegroup <группа>")
+            return
+
+        name = dt[1]
+        delete_group(message.chat.id, name)
+        bot.send_message(message.chat.id, f'Группа "{name}" удалена')
 
     @bot.message_handler(commands=['summary'])
     def summary(message):
