@@ -15,6 +15,12 @@ def init_db():
                 message_id BIGINT
             );""")
 
+        # CREATE TABLE IF NOT EXISTS above won't add columns to a table that
+        # already exists with an older schema, so heal it explicitly here.
+        cursor.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS replied_message TEXT DEFAULT NULL;")
+        cursor.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS message_id BIGINT;")
+        cursor.execute("ALTER TABLE messages ALTER COLUMN user_id TYPE BIGINT;")
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS chat_state (
                 chat_id BIGINT PRIMARY KEY,
