@@ -36,7 +36,12 @@ def build_message_link(chat_id, message_id):
     if not message_id:
         return None
     chat_id_str = str(chat_id)
-    internal_id = chat_id_str[4:] if chat_id_str.startswith('-100') else chat_id_str.lstrip('-')
+    # t.me/c/<id>/<msg> links only work for supergroups/channels, whose
+    # chat_id is always -100xxxxxxxxxxx. Regular (non-super) groups have no
+    # working message permalink at all, so don't fabricate a dead URL.
+    if not chat_id_str.startswith('-100'):
+        return None
+    internal_id = chat_id_str[4:]
     return f"https://t.me/c/{internal_id}/{message_id}"
 
 
