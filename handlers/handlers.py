@@ -170,7 +170,7 @@ def load_handlers(bot):
         usernames = MENTION_GROUPS.get(group)
         if not usernames:
             return
-        bot.send_message(message.chat.id, f"🔔 {group}: {' '.join(usernames)}")
+        bot.send_message(message.chat.id, f"{group}: {' '.join(usernames)}")
 
     @bot.message_handler(commands=['summary'])
     def summary(message):
