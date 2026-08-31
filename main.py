@@ -38,7 +38,7 @@ def start_app():
         return
     try:
         print("Бот запущен...")
-        bot.polling()
+        bot.infinity_polling()
     except Exception as e:
         print(f"Ошибка при запуске бота: {e}")
 
