@@ -42,21 +42,14 @@ def build_message_link(chat_id, message_id):
 
 def format_summary_html(raw_text, legend):
     escaped = html.escape(raw_text)
-    lines = []
-    for line in escaped.split('\n'):
-        stripped = line.strip()
-        if stripped.startswith('## '):
-            lines.append(f'<b>{stripped[3:].strip()}</b>')
-        else:
-            lines.append(line)
-    text = '\n'.join(lines)
 
     def replace_citation(match):
         n = int(match.group(1))
         url = legend.get(n)
-        return f'<a href="{url}">{n}</a>' if url else ''
+        return f'<a href="{url}">[{n}]</a> ' if url else ''
 
-    return re.sub(r'\[(\d+)\]', replace_citation, text)
+    text = re.sub(r'\[(\d+)\]', replace_citation, escaped)
+    return '\n'.join(line.rstrip() for line in text.split('\n'))
 
 
 def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18):
