@@ -4,13 +4,13 @@ from llm.prompt import prompt_for_llm
 
 API_key = get_token_gemini()
 
-def send_prompt(prompt):
+def send_prompt(prompt, max_lines=18):
     if not API_key:
         print("Ошибка: GEMINI_API_KEY не установлен")
         return None
-    
+
     client = genai.Client(api_key=API_key)
-    full_prompt = prompt_for_llm + prompt
+    full_prompt = prompt_for_llm.format(max_lines=max_lines) + prompt
     
     # Пытаемся использовать новую модель
     try:

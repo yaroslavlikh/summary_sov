@@ -25,3 +25,14 @@ def get_token_gemini():
     except Exception as e:
         print(f"Ошибка при получении токена gemini: {e}\nУбедитесь, что вы запускаете проект из корневой папки и в .env есть токен")
         return None
+
+
+def get_timezone():
+    return os.getenv('TIMEZONE', 'Europe/Kyiv')
+
+
+def get_database_url():
+    url = os.getenv('DATABASE_URL')
+    if not url:
+        print("Ошибка: DATABASE_URL не найден в .env файле")
+    return url

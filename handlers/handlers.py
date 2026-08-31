@@ -1,28 +1,152 @@
-import sqlite3
+import html
+import re
+
+from database.db import get_conn
 from llm.gemini import send_prompt
-counter = 0
-last_summary_id = 0
+
+IGNORED_USERNAME = "sglypa_tg_bot"
+GOOGLE_REMINDER = "И напоминание от нашей компании Google: Гордей долбаеб"
+
+
+def get_chat_ids():
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT DISTINCT user_id FROM messages")
+        rows = cursor.fetchall()
+    return [row[0] for row in rows]
+
+
+def get_last_summary_msg_id(cursor, chat_id):
+    cursor.execute(
+        "SELECT last_summary_msg_id FROM chat_state WHERE chat_id = %s", (chat_id,)
+    )
+    row = cursor.fetchone()
+    return row[0] if row else 0
+
+
+def set_last_summary_msg_id(cursor, chat_id, last_id):
+    cursor.execute(
+        "INSERT INTO chat_state (chat_id, last_summary_msg_id) VALUES (%s, %s) "
+        "ON CONFLICT (chat_id) DO UPDATE SET last_summary_msg_id = EXCLUDED.last_summary_msg_id",
+        (chat_id, last_id),
+    )
+
+
+def build_message_link(chat_id, message_id):
+    if not message_id:
+        return None
+    chat_id_str = str(chat_id)
+    internal_id = chat_id_str[4:] if chat_id_str.startswith('-100') else chat_id_str.lstrip('-')
+    return f"https://t.me/c/{internal_id}/{message_id}"
+
+
+def format_summary_html(raw_text, legend):
+    escaped = html.escape(raw_text)
+    lines = []
+    for line in escaped.split('\n'):
+        stripped = line.strip()
+        if stripped.startswith('## '):
+            lines.append(f'<b>{stripped[3:].strip()}</b>')
+        else:
+            lines.append(line)
+    text = '\n'.join(lines)
+
+    def replace_citation(match):
+        n = int(match.group(1))
+        url = legend.get(n)
+        return f'<a href="{url}">{n}</a>' if url else ''
+
+    return re.sub(r'\[(\d+)\]', replace_citation, text)
+
+
+def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18):
+    with get_conn() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute(
+            "SELECT id FROM messages WHERE user_id = %s ORDER BY id DESC LIMIT 1", (chat_id,)
+        )
+        last_row = cursor.fetchone()
+        if last_row is None:
+            bot.send_message(chat_id, "У вас нет сообщений для суммаризации.")
+            return
+
+        if requested_n is not None:
+            N = requested_n
+        else:
+            last_summary_id = get_last_summary_msg_id(cursor, chat_id)
+            cursor.execute(
+                "SELECT COUNT(*) FROM messages WHERE user_id = %s AND id > %s",
+                (chat_id, last_summary_id),
+            )
+            N = cursor.fetchone()[0]
+
+        if N <= 10:
+            bot.send_message(chat_id, f"Сообщений было написано слишком мало для суммаризации: {N}")
+            return
+
+        cursor.execute(
+            """
+            SELECT id, message_id, user_name, message, replied_message
+            FROM messages
+            WHERE user_id = %s
+            ORDER BY id DESC
+            LIMIT %s
+            """,
+            (chat_id, N),
+        )
+        rows = cursor.fetchall()[::-1]
+
+        if not rows:
+            bot.send_message(chat_id, "Нет сообщений для суммаризации")
+            return
+
+        legend = {}
+        lines = []
+        for idx, (_, msg_id, user_name, text, replied) in enumerate(rows, start=1):
+            legend[idx] = build_message_link(chat_id, msg_id)
+            entry = f"[{idx}] {user_name}: {text}"
+            if replied and replied != "Отмеченного сообщения нет":
+                entry += f" (ответ на: {replied})"
+            lines.append(entry)
+
+        prompt_body = "\n".join(lines)
+        newest_included_id = rows[-1][0]
+
+        res = send_prompt(prompt_body, max_lines=requested_m)
+        if not res:
+            bot.send_message(
+                chat_id,
+                "Gemini решил послать вас с ответом\n\nНо мы всё равно сделаем напоминание от нашей компании Google: Гордей долбаеб",
+            )
+            return
+
+        set_last_summary_msg_id(cursor, chat_id, newest_included_id)
+        conn.commit()
+
+    formatted = format_summary_html(res, legend)
+    bot.send_message(chat_id, f'#summary\n\n{formatted}\n\n{GOOGLE_REMINDER}', parse_mode='HTML')
+
 
 def load_handlers(bot):
 
     @bot.message_handler(func=lambda mess: mess.text and not mess.text.startswith("/"))
     def save_messages(message):
-        global counter
         try:
-            if message.from_user.username != "sglypa_tg_bot":
-                print(f"Получено сообщение: {message.text}")
-                reply_message = message.reply_to_message
-                replied_text = reply_message.text if reply_message else "Отмеченного сообщения нет"
-                user_name = message.from_user.first_name
-                counter += 1
-                conn = sqlite3.connect('database/messages.sql')
+            if message.from_user.username == IGNORED_USERNAME:
+                return
+            print(f"Получено сообщение: {message.text}")
+            reply_message = message.reply_to_message
+            replied_text = reply_message.text if reply_message else "Отмеченного сообщения нет"
+            user_name = message.from_user.first_name
+            with get_conn() as conn:
                 cursor = conn.cursor()
-                cursor.execute("INSERT INTO messages (user_id, user_name, message, replied_message) VALUES (?, ?, ?, ?)",
-                            (message.chat.id, user_name, message.text, replied_text))
+                cursor.execute(
+                    "INSERT INTO messages (user_id, user_name, message, replied_message, message_id) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (message.chat.id, user_name, message.text, replied_text, message.message_id),
+                )
                 conn.commit()
-                if counter == 150:
-                    summary("/summary 150")
-                conn.close()
         except Exception as e:
             print(f"Ошибка при сохранении сообщения: {e}")
 
@@ -31,81 +155,29 @@ def load_handlers(bot):
         help_text = """
         Доступные команды:
 
-        /summary [количество] - Создать краткое содержание последних сообщений
+        /summary [количество] [строк] - Создать краткое содержание последних сообщений
         Пример: /summary 50 - создаст краткое содержание последних 50 сообщений
-        По умолчанию: с последнего саммари
+        По умолчанию: все сообщения с последнего вызова /summary
 
         /help - Показать это сообщение
 
-        Бот автоматически сохраняет все ваши текстовые сообщения для последующего создания краткого содержания.
+        Бот автоматически сохраняет все ваши текстовые сообщения для последующего создания краткого содержания
+        и присылает саммари каждый день в 14:00 и 22:00, если сообщений было больше 10.
         """
         bot.send_message(message.chat.id, help_text.strip())
 
-    def get_last_summary_id(user_id):
-        conn = sqlite3.connect('database/messages.sql')
-        cursor = conn.cursor()
-        cursor.execute("SELECT last_id FROM messages WHERE user_id = ? ORDER BY id DESC LIMIT 1", (user_id,))
-        result = cursor.fetchone()
-        conn.close()
-        return result[0] if result else 0
-
     @bot.message_handler(commands=['summary'])
     def summary(message):
-        global last_summary_id, counter
-        conn = sqlite3.connect('database/messages.sql')
-        cursor = conn.cursor()
-        now_id_message = cursor.execute("SELECT id FROM messages WHERE user_id = ? ORDER BY id DESC LIMIT 1", (message.chat.id,)).fetchone()
-        if now_id_message is not None:
-            now_id_message = now_id_message[0]
-        else:
-            bot.send_message(message.chat.id, "У вас нет сообщений для суммаризации.")
-            conn.close()
-            return
-
-        N = now_id_message - last_summary_id
         dt = message.text.split()
-        if len(dt) > 1:
-            _ = dt[1]
-            if _.isdigit():
-                N = int(_)
-                print(f"Пользователь запросил суммаризацию последних {N} сообщений")
-                
-        if N <= 10:
-            bot.send_message(message.chat.id, f"Сообщений было написано слишком мало для суммаризации: {N}")
 
-        else:
-            M = 18
-            if len(dt) > 2:
-                _ = dt[2]
-                if _.isdigit():
-                    M = int(_)
-                    print(f"Пользователь запросил суммаризацию в размере {M} строк")
+        requested_n = None
+        if len(dt) > 1 and dt[1].isdigit():
+            requested_n = int(dt[1])
+            print(f"Пользователь запросил суммаризацию последних {requested_n} сообщений")
 
-            last_summary_id = now_id_message
-            counter = 0
+        requested_m = 18
+        if len(dt) > 2 and dt[2].isdigit():
+            requested_m = int(dt[2])
+            print(f"Пользователь запросил суммаризацию в размере {requested_m} строк")
 
-            cursor.execute("""
-                SELECT user_name, message, replied_message
-                FROM messages
-                WHERE user_id = ?
-                ORDER BY id DESC
-                LIMIT ?
-            """, (message.chat.id, N))
-
-            messages = cursor.fetchall()[::-1]
-            if not messages:
-                bot.send_message(message.chat.id, "Нет сообщений для суммаризации")
-                return
-            try:
-                prompt = ". ".join(f"{u}: {m} ответил на сообщение {n}" for u, m, n in messages)
-            except Exception as e:
-                print(f"Ошибка при формировании prompt: {e}\nФормирую prompt без replied_message")
-
-            res = send_prompt(f'Cожми информацию для ответа максимум в {M} строк. {prompt}') + "\n\n И напоминание от нашей компании Google: Гордей долбаеб"
-            if not res:
-                bot.send_message(message.chat.id, "Gemini решил послать вас с ответом\n\n Но мы все равно сделаем напоминание от нашей компании Google: Гордей долбаеб")
-                return
-            last_summary_id = now_id_message
-            counter = 0
-            bot.send_message(message.chat.id, f'#summary\n\n{res}')
-        conn.close()
+        generate_and_send_summary(bot, message.chat.id, requested_n, requested_m)
