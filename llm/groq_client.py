@@ -1,29 +1,28 @@
-from anthropic import Anthropic
+from groq import Groq
 
-from config import get_anthropic_api_key
+from config import get_groq_api_key
 from llm.prompt import prompt_for_llm
 
-API_key = get_anthropic_api_key()
+API_key = get_groq_api_key()
 
-PRIMARY_MODEL = "claude-sonnet-5"
-FALLBACK_MODEL = "claude-haiku-4-5-20251001"
+PRIMARY_MODEL = "openai/gpt-oss-120b"
+FALLBACK_MODEL = "openai/gpt-oss-20b"
 
 
 def _ask(client, model, full_prompt):
-    response = client.messages.create(
+    response = client.chat.completions.create(
         model=model,
-        max_tokens=2048,
         messages=[{"role": "user", "content": full_prompt}],
     )
-    return response.content[0].text
+    return response.choices[0].message.content
 
 
 def send_prompt(prompt, max_lines=18):
     if not API_key:
-        print("Ошибка: ANTHROPIC_API_KEY не установлен")
+        print("Ошибка: GROQ_API_KEY не установлен")
         return None
 
-    client = Anthropic(api_key=API_key)
+    client = Groq(api_key=API_key)
     full_prompt = prompt_for_llm.format(max_lines=max_lines) + prompt
 
     try:
