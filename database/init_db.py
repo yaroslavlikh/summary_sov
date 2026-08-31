@@ -21,6 +21,29 @@ def init_db():
         cursor.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS message_id BIGINT;")
         cursor.execute("ALTER TABLE messages ALTER COLUMN user_id TYPE BIGINT;")
 
+        # A pre-existing table can also have an `id` column with no
+        # auto-increment default (e.g. created as plain INTEGER PRIMARY KEY),
+        # which makes every insert fail with a not-null violation.
+        cursor.execute("""
+            DO $$
+            DECLARE
+                tbl_oid oid := 'messages'::regclass;
+                has_default boolean;
+            BEGIN
+                SELECT EXISTS (
+                    SELECT 1 FROM pg_attrdef ad
+                    JOIN pg_attribute a ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
+                    WHERE ad.adrelid = tbl_oid AND a.attname = 'id'
+                ) INTO has_default;
+
+                IF NOT has_default THEN
+                    CREATE SEQUENCE IF NOT EXISTS messages_id_seq OWNED BY messages.id;
+                    PERFORM setval('messages_id_seq', COALESCE((SELECT MAX(id) FROM messages), 0) + 1, false);
+                    ALTER TABLE messages ALTER COLUMN id SET DEFAULT nextval('messages_id_seq');
+                END IF;
+            END $$;
+        """)
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS chat_state (
                 chat_id BIGINT PRIMARY KEY,
