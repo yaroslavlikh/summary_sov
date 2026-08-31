@@ -2,7 +2,7 @@ import html
 import re
 
 from database.db import get_conn
-from llm.claude import send_prompt
+from llm.groq_client import send_prompt
 
 IGNORED_USERNAME = "sglypa_tg_bot"
 GOOGLE_REMINDER = "И напоминание от нашей компании Google: Гордей долбаеб"

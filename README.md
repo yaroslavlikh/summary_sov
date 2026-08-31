@@ -1,6 +1,6 @@
 # Summary Bot
 
-Telegram-бот для автоматического сохранения и суммаризации переписок с использованием Anthropic Claude API.
+Telegram-бот для автоматического сохранения и суммаризации переписок с использованием Groq API (gpt-oss).
 
 ## Описание
 
@@ -13,7 +13,7 @@ Telegram-бот для автоматического сохранения и с
 - Ручная суммаризация через команду `/summary`
 - По умолчанию — все сообщения с последнего вызова `/summary`, либо явное количество
 - Саммари разбито на тематические блоки с кликабельными ссылками на исходные сообщения
-- Интеграция с Anthropic Claude API
+- Интеграция с Groq API (gpt-oss)
 
 ## Установка и настройка
 
@@ -21,7 +21,7 @@ Telegram-бот для автоматического сохранения и с
 
 - Python 3.9 или выше
 - Telegram Bot Token
-- Anthropic API Key
+- Groq API Key
 - Postgres база данных (например, Railway)
 
 ### Шаги установки
@@ -34,14 +34,14 @@ pip install -r requirements.txt
 2. Создайте файл `.env` в корне проекта (см. `example.env`):
 ```env
 BOT_TOKEN=ваш_токен_telegram_бота
-ANTHROPIC_API_KEY=ваш_ключ_anthropic_api
+GROQ_API_KEY=ваш_ключ_groq_api
 TIMEZONE=Europe/Kyiv
 DATABASE_URL=postgresql://user:password@host:port/dbname
 ```
 
 3. Получите необходимые токены:
    - **Telegram Bot Token**: создайте бота через [@BotFather](https://t.me/BotFather)
-   - **Anthropic API Key**: получите на [console.anthropic.com](https://console.anthropic.com)
+   - **Groq API Key**: получите бесплатно на [console.groq.com/keys](https://console.groq.com/keys)
    - **DATABASE_URL**: строка подключения к Postgres (например, из Railway — Variables вашего Postgres-сервиса)
 
 ## Запуск
@@ -82,7 +82,7 @@ summary_sov/
 ├── handlers/
 │   └── handlers.py      # Обработчики сообщений и команд, генерация саммари
 ├── llm/
-│   ├── claude.py         # Интеграция с Anthropic Claude
+│   ├── groq_client.py    # Интеграция с Groq (gpt-oss)
 │   └── prompt.py         # Шаблон промпта для LLM
 ├── database/
 │   ├── db.py             # Пул соединений с Postgres
@@ -119,16 +119,16 @@ CREATE TABLE chat_state (
 Переменные окружения в файле `.env`:
 
 - `BOT_TOKEN` — токен Telegram бота
-- `ANTHROPIC_API_KEY` — ключ API Anthropic
+- `GROQ_API_KEY` — ключ API Groq
 - `DATABASE_URL` — строка подключения к Postgres
 - `TIMEZONE` — таймзона для расписания авто-саммари (по умолчанию `Europe/Kyiv`)
 
 ## Модели LLM
 
-Бот использует Anthropic Claude API с автоматическим переключением моделей:
+Бот использует Groq API с автоматическим переключением моделей:
 
-1. Первичная попытка: `claude-sonnet-5`
-2. Резервная модель: `claude-haiku-4-5-20251001` (при недоступности основной)
+1. Первичная попытка: `openai/gpt-oss-120b`
+2. Резервная модель: `openai/gpt-oss-20b` (при недоступности основной)
 
 ## Формат суммаризации
 
@@ -150,8 +150,8 @@ CREATE TABLE chat_state (
 
 ### Ошибки при создании суммаризации
 
-- Проверьте корректность `ANTHROPIC_API_KEY`
-- Убедитесь в наличии доступа и баланса API ключа
+- Проверьте корректность `GROQ_API_KEY`
+- Убедитесь в наличии доступа и лимитов API ключа
 - Проверьте наличие сообщений в базе данных
 
 ### Проблемы с базой данных
@@ -163,7 +163,7 @@ CREATE TABLE chat_state (
 
 - **Библиотека для Telegram**: pyTelegramBotAPI (telebot)
 - **База данных**: Postgres (psycopg2, пул соединений)
-- **LLM API**: Anthropic Claude
+- **LLM API**: Groq (gpt-oss)
 - **Управление конфигурацией**: python-dotenv
 
 ## Лицензия
