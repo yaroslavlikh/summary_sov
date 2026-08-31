@@ -2,6 +2,7 @@ import telebot
 from config import get_key_bot
 from handlers.handlers import load_handlers
 from database.init_db import init_db
+from scheduler import start_scheduler
 
 import urllib3
 urllib3.util.connection.HAS_IPV6 = False
@@ -29,6 +30,11 @@ def start_app():
         load_handlers(bot)
     except Exception as e:
         print(f"Ошибка загрузки обработчиков: {e}")
+        return
+    try:
+        start_scheduler(bot)
+    except Exception as e:
+        print(f"Ошибка запуска планировщика саммари: {e}")
         return
     try:
         print("Бот запущен...")
