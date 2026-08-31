@@ -19,6 +19,7 @@ def init_db():
         # already exists with an older schema, so heal it explicitly here.
         cursor.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS replied_message TEXT DEFAULT NULL;")
         cursor.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS message_id BIGINT;")
+        cursor.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS username TEXT;")
         cursor.execute("ALTER TABLE messages ALTER COLUMN user_id TYPE BIGINT;")
 
         # A pre-existing table can also have an `id` column with no
@@ -49,6 +50,7 @@ def init_db():
                 chat_id BIGINT PRIMARY KEY,
                 last_summary_msg_id INTEGER NOT NULL DEFAULT 0
             );""")
+        cursor.execute("ALTER TABLE chat_state ADD COLUMN IF NOT EXISTS last_summary_text TEXT DEFAULT NULL;")
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS mention_groups (

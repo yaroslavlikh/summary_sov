@@ -2,6 +2,7 @@ import html
 import re
 
 from database.db import get_conn
+from display_names import resolve_display_name
 from llm.groq_client import send_prompt
 from mention_groups import (
     add_to_group,
@@ -22,20 +23,26 @@ def get_chat_ids():
     return [row[0] for row in rows]
 
 
-def get_last_summary_msg_id(cursor, chat_id):
+def get_chat_state(cursor, chat_id):
     cursor.execute(
-        "SELECT last_summary_msg_id FROM chat_state WHERE chat_id = %s", (chat_id,)
+        "SELECT last_summary_msg_id, last_summary_text FROM chat_state WHERE chat_id = %s", (chat_id,)
     )
     row = cursor.fetchone()
-    return row[0] if row else 0
+    return (row[0], row[1]) if row else (0, None)
 
 
-def set_last_summary_msg_id(cursor, chat_id, last_id):
+def save_chat_state(cursor, chat_id, last_id, summary_text):
     cursor.execute(
-        "INSERT INTO chat_state (chat_id, last_summary_msg_id) VALUES (%s, %s) "
-        "ON CONFLICT (chat_id) DO UPDATE SET last_summary_msg_id = EXCLUDED.last_summary_msg_id",
-        (chat_id, last_id),
+        "INSERT INTO chat_state (chat_id, last_summary_msg_id, last_summary_text) VALUES (%s, %s, %s) "
+        "ON CONFLICT (chat_id) DO UPDATE SET "
+        "last_summary_msg_id = EXCLUDED.last_summary_msg_id, "
+        "last_summary_text = EXCLUDED.last_summary_text",
+        (chat_id, last_id, summary_text),
     )
+
+
+def strip_citations(text):
+    return re.sub(r'\s*\[\d+\]', '', text)
 
 
 def build_message_link(chat_id, message_id):
@@ -75,10 +82,11 @@ def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18):
             bot.send_message(chat_id, "У вас нет сообщений для суммаризации.")
             return
 
+        last_summary_id, last_summary_text = get_chat_state(cursor, chat_id)
+
         if requested_n is not None:
             N = requested_n
         else:
-            last_summary_id = get_last_summary_msg_id(cursor, chat_id)
             cursor.execute(
                 "SELECT COUNT(*) FROM messages WHERE user_id = %s AND id > %s",
                 (chat_id, last_summary_id),
@@ -91,7 +99,7 @@ def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18):
 
         cursor.execute(
             """
-            SELECT id, message_id, user_name, message, replied_message
+            SELECT id, message_id, user_name, username, message, replied_message
             FROM messages
             WHERE user_id = %s
             ORDER BY id DESC
@@ -107,14 +115,19 @@ def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18):
 
         legend = {}
         lines = []
-        for idx, (_, msg_id, user_name, text, replied) in enumerate(rows, start=1):
+        for idx, (_, msg_id, user_name, username, text, replied) in enumerate(rows, start=1):
             legend[idx] = build_message_link(chat_id, msg_id)
-            entry = f"[{idx}] {user_name}: {text}"
+            author = resolve_display_name(username, user_name)
+            entry = f"[{idx}] {author}: {text}"
             if replied and replied != "Отмеченного сообщения нет":
                 entry += f" (ответ на: {replied})"
             lines.append(entry)
 
-        prompt_body = "\n".join(lines)
+        prompt_body = ""
+        if last_summary_text:
+            prompt_body += f"Предыдущее саммари (контекст, не пересказывай его тезисы заново):\n{last_summary_text}\n\n"
+        prompt_body += "Новые сообщения:\n" + "\n".join(lines)
+
         newest_included_id = rows[-1][0]
 
         res = send_prompt(prompt_body, max_lines=requested_m)
@@ -122,7 +135,7 @@ def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18):
             bot.send_message(chat_id, "LLM решил послать вас с ответом")
             return
 
-        set_last_summary_msg_id(cursor, chat_id, newest_included_id)
+        save_chat_state(cursor, chat_id, newest_included_id, strip_citations(res))
         conn.commit()
 
     formatted = format_summary_html(res, legend)
@@ -143,9 +156,9 @@ def load_handlers(bot):
             with get_conn() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "INSERT INTO messages (user_id, user_name, message, replied_message, message_id) "
-                    "VALUES (%s, %s, %s, %s, %s)",
-                    (message.chat.id, user_name, message.text, replied_text, message.message_id),
+                    "INSERT INTO messages (user_id, user_name, username, message, replied_message, message_id) "
+                    "VALUES (%s, %s, %s, %s, %s, %s)",
+                    (message.chat.id, user_name, message.from_user.username, message.text, replied_text, message.message_id),
                 )
                 conn.commit()
         except Exception as e:
