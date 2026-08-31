@@ -50,4 +50,13 @@ def init_db():
                 last_summary_msg_id INTEGER NOT NULL DEFAULT 0
             );""")
 
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS mention_groups (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                group_name TEXT NOT NULL,
+                username TEXT NOT NULL,
+                UNIQUE (chat_id, group_name, username)
+            );""")
+
         conn.commit()
