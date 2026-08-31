@@ -3,6 +3,7 @@ import re
 
 from database.db import get_conn
 from llm.groq_client import send_prompt
+from mention_groups import MENTION_GROUPS
 
 IGNORED_USERNAME = "sglypa_tg_bot"
 
@@ -146,12 +147,15 @@ def load_handlers(bot):
 
     @bot.message_handler(commands=['help'])
     def help_command(message):
-        help_text = """
+        groups_list = ", ".join(f"/{name}" for name in MENTION_GROUPS)
+        help_text = f"""
         Доступные команды:
 
         /summary [количество] [строк] - Создать краткое содержание последних сообщений
         Пример: /summary 50 - создаст краткое содержание последних 50 сообщений
         По умолчанию: все сообщения с последнего вызова /summary
+
+        {groups_list} - позвать всех из соответствующей группы
 
         /help - Показать это сообщение
 
@@ -159,6 +163,14 @@ def load_handlers(bot):
         и присылает саммари каждый день в 14:00 и 22:00, если сообщений было больше 10.
         """
         bot.send_message(message.chat.id, help_text.strip())
+
+    @bot.message_handler(commands=list(MENTION_GROUPS.keys()))
+    def mention_group(message):
+        group = message.text.split()[0][1:].split('@')[0]
+        usernames = MENTION_GROUPS.get(group)
+        if not usernames:
+            return
+        bot.send_message(message.chat.id, f"🔔 {group}: {' '.join(usernames)}")
 
     @bot.message_handler(commands=['summary'])
     def summary(message):
