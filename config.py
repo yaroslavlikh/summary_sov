@@ -16,14 +16,14 @@ def get_key_bot():
         return None
 
 
-def get_token_gemini():
+def get_anthropic_api_key():
     try:
-        token = os.getenv('GEMINI_API_KEY')
+        token = os.getenv('ANTHROPIC_API_KEY')
         if not token:
-            print("Ошибка: GEMINI_API_KEY не найден в .env файле")
+            print("Ошибка: ANTHROPIC_API_KEY не найден в .env файле")
         return token
     except Exception as e:
-        print(f"Ошибка при получении токена gemini: {e}\nУбедитесь, что вы запускаете проект из корневой папки и в .env есть токен")
+        print(f"Ошибка при получении ключа Anthropic: {e}\nУбедитесь, что вы запускаете проект из корневой папки и в .env есть токен")
         return None
 
 
