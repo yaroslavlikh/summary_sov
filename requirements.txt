@@ -1,7 +1,6 @@
 pyTelegramBotAPI
 requests
-google
-google-genai
+anthropic
 python-dotenv
 urllib3
 psycopg2-binary

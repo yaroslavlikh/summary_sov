@@ -2,7 +2,7 @@ import html
 import re
 
 from database.db import get_conn
-from llm.gemini import send_prompt
+from llm.claude import send_prompt
 
 IGNORED_USERNAME = "sglypa_tg_bot"
 GOOGLE_REMINDER = "И напоминание от нашей компании Google: Гордей долбаеб"
@@ -117,7 +117,7 @@ def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18):
         if not res:
             bot.send_message(
                 chat_id,
-                "Gemini решил послать вас с ответом\n\nНо мы всё равно сделаем напоминание от нашей компании Google: Гордей долбаеб",
+                "LLM решил послать вас с ответом\n\nНо мы всё равно сделаем напоминание от нашей компании Google: Гордей долбаеб",
             )
             return
 
