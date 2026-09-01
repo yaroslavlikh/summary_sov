@@ -143,20 +143,53 @@ def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18):
     bot.send_message(chat_id, f'#summary\n\n{formatted}', parse_mode='HTML')
 
 
+# plainto_tsquery ANDs every word together, which fails as soon as the
+# question includes meta-words ("менялся", "разговор") that describe the
+# question itself rather than vocabulary the chat actually used. Build an
+# OR-query instead so a message matching any one concept word can surface.
+LATIN_CYRILLIC_JARGON = {
+    "rag": "раг",
+    "раг": "rag",
+    "sql": "скл",
+}
+
+
+def _build_or_query(cursor, question):
+    cursor.execute("SELECT plainto_tsquery('russian', %s)::text", (question,))
+    row = cursor.fetchone()
+    tsquery_text = row[0] if row else None
+    if not tsquery_text:
+        return None
+
+    lexemes = set(re.findall(r"'([^']+)'", tsquery_text))
+    for lex in list(lexemes):
+        alias = LATIN_CYRILLIC_JARGON.get(lex.lower())
+        if alias:
+            lexemes.add(alias)
+
+    return " | ".join(f"'{lex}'" for lex in lexemes) or None
+
+
 def answer_chat_question(bot, chat_id, question):
     with get_conn() as conn:
         cursor = conn.cursor()
+
+        or_query = _build_or_query(cursor, question)
+        if not or_query:
+            bot.send_message(chat_id, "В истории чата не нашёл ничего похожего на этот вопрос.")
+            return
+
         cursor.execute(
             """
             SELECT id FROM (
-                SELECT id, ts_rank(search_vector, plainto_tsquery('russian', %s)) AS rank
+                SELECT id, ts_rank(search_vector, to_tsquery('russian', %s)) AS rank
                 FROM messages
-                WHERE user_id = %s AND search_vector @@ plainto_tsquery('russian', %s)
+                WHERE user_id = %s AND search_vector @@ to_tsquery('russian', %s)
                 ORDER BY rank DESC
                 LIMIT 8
             ) top_matches
             """,
-            (question, chat_id, question),
+            (or_query, chat_id, or_query),
         )
         match_ids = [row[0] for row in cursor.fetchall()]
 
