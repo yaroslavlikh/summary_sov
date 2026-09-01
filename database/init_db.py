@@ -4,6 +4,7 @@ from database.db import get_conn
 def init_db():
     with get_conn() as conn:
         cursor = conn.cursor()
+        cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id SERIAL PRIMARY KEY,
@@ -68,6 +69,14 @@ def init_db():
         """)
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS messages_search_idx ON messages USING GIN (search_vector);
+        """)
+
+        # Semantic search (embeddings), for paraphrased /ask questions that
+        # full-text search can't match on shared vocabulary alone.
+        cursor.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS embedding vector(384);")
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS messages_embedding_idx ON messages
+                USING hnsw (embedding vector_cosine_ops);
         """)
 
         conn.commit()

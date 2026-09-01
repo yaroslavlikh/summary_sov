@@ -3,6 +3,7 @@ import re
 
 from database.db import get_conn
 from display_names import resolve_display_name
+from embeddings import embed, to_vector_literal
 from llm.groq_client import answer_question, send_prompt
 from llm.prompt import prompt_for_qa
 from mention_groups import (
@@ -174,36 +175,48 @@ def answer_chat_question(bot, chat_id, question):
     with get_conn() as conn:
         cursor = conn.cursor()
 
-        or_query = _build_or_query(cursor, question)
-        if not or_query:
-            bot.send_message(chat_id, "В истории чата не нашёл ничего похожего на этот вопрос.")
-            return
+        match_ids = set()
 
-        # Match against a chunk (the message + 3 neighbors on each side)
-        # instead of the message alone. This catches discussions where the
-        # relevant words are spread across a few adjacent replies rather than
-        # sitting together in one message — no single message may match
-        # strongly enough on its own, but the window around it does.
+        # Full-text: match against a chunk (the message + 3 neighbors on each
+        # side) instead of the message alone. This catches discussions where
+        # the relevant words are spread across a few adjacent replies rather
+        # than sitting together in one message.
+        or_query = _build_or_query(cursor, question)
+        if or_query:
+            cursor.execute(
+                """
+                WITH windowed AS (
+                    SELECT id, string_agg(message, ' ') OVER (
+                        ORDER BY id ROWS BETWEEN 3 PRECEDING AND 3 FOLLOWING
+                    ) AS chunk_text
+                    FROM messages
+                    WHERE user_id = %s
+                )
+                SELECT id FROM (
+                    SELECT id, ts_rank(to_tsvector('russian', chunk_text), to_tsquery('russian', %s)) AS rank
+                    FROM windowed
+                    WHERE to_tsvector('russian', chunk_text) @@ to_tsquery('russian', %s)
+                    ORDER BY rank DESC
+                    LIMIT 8
+                ) top_matches
+                """,
+                (chat_id, or_query, or_query),
+            )
+            match_ids.update(row[0] for row in cursor.fetchall())
+
+        # Semantic: catches paraphrased questions that share no vocabulary
+        # with the messages that actually answer them.
+        question_vector = to_vector_literal(embed(question))
         cursor.execute(
             """
-            WITH windowed AS (
-                SELECT id, string_agg(message, ' ') OVER (
-                    ORDER BY id ROWS BETWEEN 3 PRECEDING AND 3 FOLLOWING
-                ) AS chunk_text
-                FROM messages
-                WHERE user_id = %s
-            )
-            SELECT id FROM (
-                SELECT id, ts_rank(to_tsvector('russian', chunk_text), to_tsquery('russian', %s)) AS rank
-                FROM windowed
-                WHERE to_tsvector('russian', chunk_text) @@ to_tsquery('russian', %s)
-                ORDER BY rank DESC
-                LIMIT 8
-            ) top_matches
+            SELECT id FROM messages
+            WHERE user_id = %s AND embedding IS NOT NULL
+            ORDER BY embedding <=> %s::vector
+            LIMIT 8
             """,
-            (chat_id, or_query, or_query),
+            (chat_id, question_vector),
         )
-        match_ids = [row[0] for row in cursor.fetchall()]
+        match_ids.update(row[0] for row in cursor.fetchall())
 
         if not match_ids:
             bot.send_message(chat_id, "В истории чата не нашёл ничего похожего на этот вопрос.")
@@ -259,12 +272,13 @@ def load_handlers(bot):
             reply_message = message.reply_to_message
             replied_text = reply_message.text if reply_message else "Отмеченного сообщения нет"
             user_name = message.from_user.first_name
+            embedding_literal = to_vector_literal(embed(message.text))
             with get_conn() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "INSERT INTO messages (user_id, user_name, username, message, replied_message, message_id) "
-                    "VALUES (%s, %s, %s, %s, %s, %s)",
-                    (message.chat.id, user_name, message.from_user.username, message.text, replied_text, message.message_id),
+                    "INSERT INTO messages (user_id, user_name, username, message, replied_message, message_id, embedding) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (message.chat.id, user_name, message.from_user.username, message.text, replied_text, message.message_id, embedding_literal),
                 )
                 conn.commit()
         except Exception as e:
