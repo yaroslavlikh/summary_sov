@@ -5,3 +5,5 @@ python-dotenv
 urllib3
 psycopg2-binary
 sentence-transformers
+flask
+waitress
