@@ -184,11 +184,30 @@ def _build_or_query(cursor, question):
     return " | ".join(f"'{lex}'" for lex in lexemes) or None
 
 
-def answer_chat_question(bot, chat_id, question):
+def answer_chat_question(bot, chat_id, question, replied_message_id=None):
     with get_conn() as conn:
         cursor = conn.cursor()
 
         match_ids = set()
+
+        # A short/deictic question ("это правда?", "серьёзно?") carries no
+        # useful search keywords on its own — it refers to whatever was just
+        # replied to, or whatever was just being discussed. Anchor on those
+        # directly instead of relying on search to guess.
+        if replied_message_id:
+            cursor.execute(
+                "SELECT id FROM messages WHERE user_id = %s AND message_id = %s",
+                (chat_id, replied_message_id),
+            )
+            row = cursor.fetchone()
+            if row:
+                match_ids.add(row[0])
+
+        cursor.execute(
+            "SELECT id FROM messages WHERE user_id = %s ORDER BY id DESC LIMIT 10",
+            (chat_id,),
+        )
+        match_ids.update(row[0] for row in cursor.fetchall())
 
         # Full-text: match against a chunk (the message + 3 neighbors on each
         # side) instead of the message alone. This catches discussions where
@@ -418,4 +437,5 @@ def load_handlers(bot):
             return
 
         question = dt[1]
-        answer_chat_question(bot, message.chat.id, question)
+        replied_message_id = message.reply_to_message.message_id if message.reply_to_message else None
+        answer_chat_question(bot, message.chat.id, question, replied_message_id)
