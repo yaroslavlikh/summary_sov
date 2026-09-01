@@ -63,10 +63,23 @@ def build_message_link(chat_id, message_id):
 def format_summary_html(raw_text, legend):
     escaped = html.escape(raw_text)
 
+    # The model cites messages by their raw index in the input batch (which
+    # can jump around, e.g. [16][19][42]), since most input messages don't
+    # end up cited at all. Renumber whatever actually appears, in order of
+    # first appearance, to a clean 1, 2, 3... sequence for the reader.
+    seen_order = []
+    for match in re.finditer(r'\[(\d+)\]', escaped):
+        n = int(match.group(1))
+        if n in legend and n not in seen_order:
+            seen_order.append(n)
+    remap = {old: new for new, old in enumerate(seen_order, start=1)}
+
     def replace_citation(match):
         n = int(match.group(1))
         url = legend.get(n)
-        return f'<a href="{url}">[{n}]</a> ' if url else ''
+        if not url:
+            return ''
+        return f'<a href="{url}">[{remap[n]}]</a> '
 
     text = re.sub(r'\[(\d+)\]', replace_citation, escaped)
     return '\n'.join(line.rstrip() for line in text.split('\n'))
