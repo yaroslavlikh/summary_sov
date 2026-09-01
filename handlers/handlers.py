@@ -189,11 +189,12 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None):
         cursor = conn.cursor()
 
         match_ids = set()
+        anchor_id = None
 
         # A short/deictic question ("это правда?", "серьёзно?") carries no
         # useful search keywords on its own — it refers to whatever was just
-        # replied to, or whatever was just being discussed. Anchor on those
-        # directly instead of relying on search to guess.
+        # replied to. Anchor on that directly instead of relying on search
+        # to guess, and remember it so we can flag it for the model below.
         if replied_message_id:
             cursor.execute(
                 "SELECT id FROM messages WHERE user_id = %s AND message_id = %s",
@@ -201,13 +202,18 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None):
             )
             row = cursor.fetchone()
             if row:
-                match_ids.add(row[0])
+                anchor_id = row[0]
+                match_ids.add(anchor_id)
 
-        cursor.execute(
-            "SELECT id FROM messages WHERE user_id = %s ORDER BY id DESC LIMIT 10",
-            (chat_id,),
-        )
-        match_ids.update(row[0] for row in cursor.fetchall())
+        # Only fall back to "recent messages" when there's no explicit reply
+        # anchor — otherwise it just floods the context with noise that can
+        # outweigh the one message the user actually pointed at.
+        if not anchor_id:
+            cursor.execute(
+                "SELECT id FROM messages WHERE user_id = %s ORDER BY id DESC LIMIT 10",
+                (chat_id,),
+            )
+            match_ids.update(row[0] for row in cursor.fetchall())
 
         # Full-text: match against a chunk (the message + 3 neighbors on each
         # side) instead of the message alone. This catches discussions where
@@ -229,7 +235,7 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None):
                     FROM windowed
                     WHERE to_tsvector('russian', chunk_text) @@ to_tsquery('russian', %s)
                     ORDER BY rank DESC
-                    LIMIT 8
+                    LIMIT 4
                 ) top_matches
                 """,
                 (chat_id, or_query, or_query),
@@ -244,7 +250,7 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None):
             SELECT id FROM messages
             WHERE user_id = %s AND embedding IS NOT NULL
             ORDER BY embedding <=> %s::vector
-            LIMIT 8
+            LIMIT 4
             """,
             (chat_id, question_vector),
         )
@@ -278,10 +284,11 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None):
 
     legend = {}
     lines = []
-    for idx, (_, msg_id, user_name, username, text) in enumerate(rows, start=1):
+    for idx, (row_id, msg_id, user_name, username, text) in enumerate(rows, start=1):
         legend[idx] = build_message_link(chat_id, msg_id)
         author = resolve_display_name(username, user_name)
-        lines.append(f"[{idx}] {author}: {text}")
+        tag = " [СООБЩЕНИЕ, НА КОТОРОЕ ОТВЕЧАЛИ]" if row_id == anchor_id else ""
+        lines.append(f"[{idx}] {author}: {text}{tag}")
 
     full_prompt = prompt_for_qa.format(question=question, messages="\n".join(lines))
     res = answer_question(full_prompt)
