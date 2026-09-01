@@ -179,17 +179,29 @@ def answer_chat_question(bot, chat_id, question):
             bot.send_message(chat_id, "В истории чата не нашёл ничего похожего на этот вопрос.")
             return
 
+        # Match against a chunk (the message + 3 neighbors on each side)
+        # instead of the message alone. This catches discussions where the
+        # relevant words are spread across a few adjacent replies rather than
+        # sitting together in one message — no single message may match
+        # strongly enough on its own, but the window around it does.
         cursor.execute(
             """
-            SELECT id FROM (
-                SELECT id, ts_rank(search_vector, to_tsquery('russian', %s)) AS rank
+            WITH windowed AS (
+                SELECT id, string_agg(message, ' ') OVER (
+                    ORDER BY id ROWS BETWEEN 3 PRECEDING AND 3 FOLLOWING
+                ) AS chunk_text
                 FROM messages
-                WHERE user_id = %s AND search_vector @@ to_tsquery('russian', %s)
+                WHERE user_id = %s
+            )
+            SELECT id FROM (
+                SELECT id, ts_rank(to_tsvector('russian', chunk_text), to_tsquery('russian', %s)) AS rank
+                FROM windowed
+                WHERE to_tsvector('russian', chunk_text) @@ to_tsquery('russian', %s)
                 ORDER BY rank DESC
                 LIMIT 8
             ) top_matches
             """,
-            (or_query, chat_id, or_query),
+            (chat_id, or_query, or_query),
         )
         match_ids = [row[0] for row in cursor.fetchall()]
 
@@ -197,12 +209,12 @@ def answer_chat_question(bot, chat_id, question):
             bot.send_message(chat_id, "В истории чата не нашёл ничего похожего на этот вопрос.")
             return
 
-        # A keyword match on the question rarely IS the answer — the answer is
-        # usually in a nearby reply that doesn't repeat the question's words
-        # at all. Pull in a small window of surrounding messages per match.
+        # Expand the same +-3 window for display, so the model sees the
+        # actual per-message text (with correct citation numbers), not the
+        # concatenated blob used just for matching.
         window_ids = set()
         for match_id in match_ids:
-            window_ids.update(range(match_id - 1, match_id + 5))
+            window_ids.update(range(match_id - 3, match_id + 4))
 
         cursor.execute(
             """
