@@ -3,7 +3,8 @@ import re
 
 from database.db import get_conn
 from display_names import resolve_display_name
-from llm.groq_client import send_prompt
+from llm.groq_client import answer_question, send_prompt
+from llm.prompt import prompt_for_qa
 from mention_groups import (
     add_to_group,
     delete_group,
@@ -142,6 +143,66 @@ def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18):
     bot.send_message(chat_id, f'#summary\n\n{formatted}', parse_mode='HTML')
 
 
+def answer_chat_question(bot, chat_id, question):
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id FROM (
+                SELECT id, ts_rank(search_vector, plainto_tsquery('russian', %s)) AS rank
+                FROM messages
+                WHERE user_id = %s AND search_vector @@ plainto_tsquery('russian', %s)
+                ORDER BY rank DESC
+                LIMIT 8
+            ) top_matches
+            """,
+            (question, chat_id, question),
+        )
+        match_ids = [row[0] for row in cursor.fetchall()]
+
+        if not match_ids:
+            bot.send_message(chat_id, "В истории чата не нашёл ничего похожего на этот вопрос.")
+            return
+
+        # A keyword match on the question rarely IS the answer — the answer is
+        # usually in a nearby reply that doesn't repeat the question's words
+        # at all. Pull in a small window of surrounding messages per match.
+        window_ids = set()
+        for match_id in match_ids:
+            window_ids.update(range(match_id - 1, match_id + 5))
+
+        cursor.execute(
+            """
+            SELECT id, message_id, user_name, username, message
+            FROM messages
+            WHERE user_id = %s AND id = ANY(%s)
+            ORDER BY id ASC
+            """,
+            (chat_id, list(window_ids)),
+        )
+        rows = cursor.fetchall()
+
+    if not rows:
+        bot.send_message(chat_id, "В истории чата не нашёл ничего похожего на этот вопрос.")
+        return
+
+    legend = {}
+    lines = []
+    for idx, (_, msg_id, user_name, username, text) in enumerate(rows, start=1):
+        legend[idx] = build_message_link(chat_id, msg_id)
+        author = resolve_display_name(username, user_name)
+        lines.append(f"[{idx}] {author}: {text}")
+
+    full_prompt = prompt_for_qa.format(question=question, messages="\n".join(lines))
+    res = answer_question(full_prompt)
+    if not res:
+        bot.send_message(chat_id, "LLM решил послать вас с ответом")
+        return
+
+    formatted = format_summary_html(res, legend)
+    bot.send_message(chat_id, formatted, parse_mode='HTML')
+
+
 def load_handlers(bot):
 
     @bot.message_handler(func=lambda mess: mess.text and not mess.text.startswith("/"))
@@ -172,6 +233,9 @@ def load_handlers(bot):
         /summary [количество] [строк] - Создать краткое содержание последних сообщений
         Пример: /summary 50 - создаст краткое содержание последних 50 сообщений
         По умолчанию: все сообщения с последнего вызова /summary
+
+        /ask <вопрос> - найти ответ в истории чата
+        Пример: /ask во сколько мы собирались на бильярд
 
         /ping <группа> - позвать всех из группы
         /groups - список групп в этом чате
@@ -273,3 +337,13 @@ def load_handlers(bot):
             print(f"Пользователь запросил суммаризацию в размере {requested_m} строк")
 
         generate_and_send_summary(bot, message.chat.id, requested_n, requested_m)
+
+    @bot.message_handler(commands=['ask'])
+    def ask_cmd(message):
+        dt = message.text.split(maxsplit=1)
+        if len(dt) < 2:
+            bot.send_message(message.chat.id, "Формат: /ask <вопрос>")
+            return
+
+        question = dt[1]
+        answer_chat_question(bot, message.chat.id, question)

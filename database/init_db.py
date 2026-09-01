@@ -61,4 +61,13 @@ def init_db():
                 UNIQUE (chat_id, group_name, username)
             );""")
 
+        # Full-text search over message content, for /ask.
+        cursor.execute("""
+            ALTER TABLE messages ADD COLUMN IF NOT EXISTS search_vector tsvector
+                GENERATED ALWAYS AS (to_tsvector('russian', coalesce(message, ''))) STORED;
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS messages_search_idx ON messages USING GIN (search_vector);
+        """)
+
         conn.commit()
