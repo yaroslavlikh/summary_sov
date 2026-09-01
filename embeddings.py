@@ -15,5 +15,9 @@ def embed(text):
     return _get_model().encode(text).tolist()
 
 
+def warm_up():
+    _get_model()
+
+
 def to_vector_literal(embedding):
     return '[' + ','.join(str(x) for x in embedding) + ']'

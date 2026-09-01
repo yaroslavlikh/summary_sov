@@ -4,6 +4,7 @@ import telebot
 from waitress import serve
 
 from config import get_key_bot
+from embeddings import warm_up
 from handlers.handlers import load_handlers
 from database.init_db import init_db
 from scheduler import start_scheduler
@@ -40,6 +41,13 @@ def start_app():
         start_scheduler(bot)
     except Exception as e:
         print(f"Ошибка запуска планировщика саммари: {e}")
+        return
+    try:
+        print("Прогреваю модель эмбеддингов...")
+        warm_up()
+        print("Модель эмбеддингов загружена")
+    except Exception as e:
+        print(f"Ошибка при загрузке модели эмбеддингов: {e}")
         return
     domain = os.getenv('RAILWAY_PUBLIC_DOMAIN')
     if not domain:
