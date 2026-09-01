@@ -4,3 +4,4 @@ groq
 python-dotenv
 urllib3
 psycopg2-binary
+sentence-transformers
