@@ -3,6 +3,7 @@ import re
 import threading
 
 from chat_context import add_note, get_context_block, list_notes, remove_note
+from chat_moments import search_moments
 from context_learning import learn_context
 from database.db import get_conn
 from display_names import resolve_display_name
@@ -260,7 +261,7 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None):
 
         # Semantic: catches paraphrased questions that share no vocabulary
         # with the messages that actually answer them.
-        question_vector = to_vector_literal(embed(question))
+        question_embedding = embed(question)
         cursor.execute(
             """
             SELECT id FROM messages
@@ -268,7 +269,7 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None):
             ORDER BY embedding <=> %s::vector
             LIMIT 4
             """,
-            (chat_id, question_vector),
+            (chat_id, to_vector_literal(question_embedding)),
         )
         match_ids.update(row[0] for row in cursor.fetchall())
 
@@ -307,6 +308,14 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None):
         lines.append(f"[{idx}] {author}: {text}{tag}")
 
     group_context = build_group_context_prompt_section(chat_id)
+    relevant_moments = search_moments(chat_id, question_embedding, top_k=5)
+    if relevant_moments:
+        group_context += (
+            "\nВозможно релевантные моменты из истории (мнения/настроения/шутки, "
+            "не обязательно точный источник ответа, просто дополнительный фон):\n"
+            + "\n".join(f"- {m}" for m in relevant_moments) + "\n"
+        )
+
     full_prompt = prompt_for_qa.format(question=question, messages="\n".join(lines), group_context=group_context)
     res = answer_question(full_prompt)
     if not res:

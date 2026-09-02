@@ -15,6 +15,10 @@ def embed(text):
     return _get_model().encode(text).tolist()
 
 
+def embed_batch(texts, batch_size=128):
+    return _get_model().encode(texts, batch_size=batch_size, show_progress_bar=False).tolist()
+
+
 def warm_up():
     _get_model()
 
