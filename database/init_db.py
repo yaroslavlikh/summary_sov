@@ -79,4 +79,17 @@ def init_db():
                 USING hnsw (embedding vector_cosine_ops);
         """)
 
+        # Persistent group-culture notes (inside jokes, who's who, recurring
+        # bits) fed as background context into both /summary and /ask.
+        # source distinguishes manually-added notes from ones /learncontext
+        # generated, so a re-run only replaces the auto ones.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_context (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                note TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'manual'
+            );""")
+        cursor.execute("ALTER TABLE chat_context ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'manual';")
+
         conn.commit()

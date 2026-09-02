@@ -1,6 +1,9 @@
 import html
 import re
+import threading
 
+from chat_context import add_note, get_context_block, list_notes, remove_note
+from context_learning import learn_context
 from database.db import get_conn
 from display_names import resolve_display_name
 from embeddings import embed, to_vector_literal
@@ -15,6 +18,18 @@ from mention_groups import (
 )
 
 IGNORED_USERNAME = "sglypa_tg_bot"
+
+
+def build_group_context_prompt_section(chat_id):
+    notes = get_context_block(chat_id)
+    if not notes:
+        return ""
+    return (
+        "\nКонтекст о группе (не сами сообщения переписки, а накопленные заметки "
+        "про участников, их характерные черты, повторяющиеся шутки/темы — используй "
+        "только для лучшего понимания тона и отсылок, не пересказывай как содержание):\n"
+        f"{notes}\n"
+    )
 
 
 def get_chat_ids():
@@ -145,7 +160,8 @@ def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18):
 
         newest_included_id = rows[-1][0]
 
-        res = send_prompt(prompt_body, max_lines=requested_m)
+        group_context = build_group_context_prompt_section(chat_id)
+        res = send_prompt(prompt_body, max_lines=requested_m, group_context=group_context)
         if not res:
             bot.send_message(chat_id, "LLM решил послать вас с ответом")
             return
@@ -290,7 +306,8 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None):
         tag = " [СООБЩЕНИЕ, НА КОТОРОЕ ОТВЕЧАЛИ]" if row_id == anchor_id else ""
         lines.append(f"[{idx}] {author}: {text}{tag}")
 
-    full_prompt = prompt_for_qa.format(question=question, messages="\n".join(lines))
+    group_context = build_group_context_prompt_section(chat_id)
+    full_prompt = prompt_for_qa.format(question=question, messages="\n".join(lines), group_context=group_context)
     res = answer_question(full_prompt)
     if not res:
         bot.send_message(chat_id, "LLM решил послать вас с ответом")
@@ -341,6 +358,11 @@ def load_handlers(bot):
         /addto <группа> @user1 @user2 ... - добавить в группу
         /removefrom <группа> @user1 @user2 ... - убрать из группы
         /deletegroup <группа> - удалить группу целиком
+
+        /addcontext <заметка> - добавить заметку о группе вручную
+        /context - показать все заметки
+        /removecontext <id> - удалить заметку
+        /learncontext - автоматически собрать портреты людей и повторяющиеся паттерны по всей истории чата (может занять время)
 
         /help - Показать это сообщение
 
@@ -446,3 +468,56 @@ def load_handlers(bot):
         question = dt[1]
         replied_message_id = message.reply_to_message.message_id if message.reply_to_message else None
         answer_chat_question(bot, message.chat.id, question, replied_message_id)
+
+    @bot.message_handler(commands=['addcontext'])
+    def add_context_cmd(message):
+        dt = message.text.split(maxsplit=1)
+        if len(dt) < 2:
+            bot.send_message(message.chat.id, "Формат: /addcontext <заметка>")
+            return
+
+        note_id = add_note(message.chat.id, dt[1])
+        bot.send_message(message.chat.id, f'Добавлено (#{note_id}): {dt[1]}')
+
+    @bot.message_handler(commands=['context'])
+    def list_context_cmd(message):
+        notes = list_notes(message.chat.id)
+        if not notes:
+            bot.send_message(message.chat.id, "Заметок пока нет")
+            return
+        bot.send_message(message.chat.id, "\n".join(f"#{note_id}: {note}" for note_id, note in notes))
+
+    @bot.message_handler(commands=['removecontext'])
+    def remove_context_cmd(message):
+        dt = message.text.split()
+        if len(dt) < 2 or not dt[1].isdigit():
+            bot.send_message(message.chat.id, "Формат: /removecontext <id>")
+            return
+
+        if remove_note(message.chat.id, int(dt[1])):
+            bot.send_message(message.chat.id, f'Заметка #{dt[1]} удалена')
+        else:
+            bot.send_message(message.chat.id, f'Нет заметки #{dt[1]}')
+
+    @bot.message_handler(commands=['learncontext'])
+    def learn_context_cmd(message):
+        chat_id = message.chat.id
+        bot.send_message(chat_id, "Начал сбор контекста по всей истории чата, это может занять время...")
+
+        def run():
+            try:
+                portraits, patterns = learn_context(chat_id)
+                blocks = []
+                if portraits:
+                    blocks.append("Портреты:\n" + "\n".join(portraits))
+                if patterns:
+                    blocks.append("Повторяющиеся паттерны:\n" + "\n".join(f"- {p}" for p in patterns))
+                if not blocks:
+                    bot.send_message(chat_id, "Не нашёл ничего значимого — возможно, истории пока маловато.")
+                    return
+                bot.send_message(chat_id, "Контекст обновлён:\n\n" + "\n\n".join(blocks))
+            except Exception as e:
+                print(f"Ошибка при сборе контекста: {e}")
+                bot.send_message(chat_id, "Что-то пошло не так при сборе контекста, гляну логи.")
+
+        threading.Thread(target=run, daemon=True).start()
