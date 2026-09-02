@@ -92,4 +92,20 @@ def init_db():
             );""")
         cursor.execute("ALTER TABLE chat_context ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'manual';")
 
+        # One-off notable moods/opinions/jokes from the chronological pass --
+        # unlike chat_context, this isn't always injected (could grow into the
+        # hundreds), it's retrieved via vector search only when relevant to a
+        # specific /ask question.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_moments (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                note TEXT NOT NULL,
+                embedding vector(384)
+            );""")
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS chat_moments_embedding_idx ON chat_moments
+                USING hnsw (embedding vector_cosine_ops);
+        """)
+
         conn.commit()

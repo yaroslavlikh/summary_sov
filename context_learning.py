@@ -4,11 +4,14 @@ from sklearn.cluster import HDBSCAN
 from sklearn.preprocessing import normalize
 
 from chat_context import add_note, delete_auto_notes
+from chat_moments import add_moment, delete_all_moments
 from database.db import get_conn
 from display_names import resolve_display_name
+from embeddings import embed
 from llm.groq_client import answer_context_question
 from llm.prompt import (
     prompt_for_cluster_description,
+    prompt_for_moments_map,
     prompt_for_portrait_map,
     prompt_for_portrait_reduce,
 )
@@ -17,6 +20,7 @@ PERSON_BATCH_SIZE = 200
 MIN_MESSAGES_FOR_PORTRAIT = 10
 MIN_CLUSTER_SIZE = 3
 MAX_CLUSTER_SAMPLE = 15
+MOMENTS_BATCH_SIZE = 500
 
 
 def _parse_vector(value):
@@ -27,7 +31,93 @@ def _parse_vector(value):
     return list(value)
 
 
-def _generate_person_portraits(chat_id):
+def build_portrait(display_name, texts):
+    """Map-reduce a person's texts (from any source) into one portrait note, or None."""
+    if len(texts) < MIN_MESSAGES_FOR_PORTRAIT:
+        return None
+
+    observations = []
+    for i in range(0, len(texts), PERSON_BATCH_SIZE):
+        batch = texts[i:i + PERSON_BATCH_SIZE]
+        obs = answer_context_question(prompt_for_portrait_map.format(messages="\n".join(batch)))
+        if obs:
+            observations.append(obs)
+
+    if not observations:
+        return None
+
+    portrait = answer_context_question(
+        prompt_for_portrait_reduce.format(name=display_name, observations="\n\n".join(observations))
+    )
+    return f"Портрет: {display_name} — {portrait.strip()}" if portrait else None
+
+
+def cluster_and_describe(texts_with_vectors):
+    """texts_with_vectors: list of (text, embedding_vector). Returns pattern note strings.
+
+    Embeddings are only used in-memory for this clustering pass -- nothing
+    here writes bulk data anywhere, only the resulting short descriptions do.
+    """
+    if len(texts_with_vectors) < MIN_CLUSTER_SIZE:
+        return []
+
+    texts = [t for t, _ in texts_with_vectors]
+    vectors = normalize([v for _, v in texts_with_vectors])
+
+    # L2-normalized vectors make euclidean distance equivalent to cosine
+    # distance, and sklearn's HDBSCAN is numerically unstable with
+    # metric='cosine' directly (produces overflow/divide-by-zero warnings).
+    clusterer = HDBSCAN(min_cluster_size=MIN_CLUSTER_SIZE, metric='euclidean')
+    labels = clusterer.fit_predict(vectors)
+
+    clusters = defaultdict(list)
+    for label, text in zip(labels, texts):
+        if label != -1:
+            clusters[label].append(text)
+
+    patterns = []
+    for members in clusters.values():
+        if len(members) <= MAX_CLUSTER_SAMPLE:
+            sample = members
+        else:
+            step = len(members) // MAX_CLUSTER_SAMPLE
+            sample = members[::step][:MAX_CLUSTER_SAMPLE]
+
+        desc = answer_context_question(
+            prompt_for_cluster_description.format(messages="\n".join(f"- {m}" for m in sample))
+        )
+        if desc and "НЕЗНАЧИМО" not in desc:
+            patterns.append(desc.strip())
+
+    return patterns
+
+
+def generate_moments(chat_id, chronological_lines):
+    """chronological_lines: list of "Автор: текст" strings, in time order.
+
+    Runs a map-only pass (no reduce) extracting notable moods/opinions/jokes
+    per chunk, embeds each one, and stores it directly into chat_moments --
+    retrieved later via RAG, not always injected, so there's no need to
+    compress this down to a small fixed set.
+    """
+    count = 0
+    for i in range(0, len(chronological_lines), MOMENTS_BATCH_SIZE):
+        batch = chronological_lines[i:i + MOMENTS_BATCH_SIZE]
+        res = answer_context_question(prompt_for_moments_map.format(messages="\n".join(batch)))
+        if not res or "НЕТ" in res.strip()[:10]:
+            continue
+
+        for line in res.split("\n"):
+            line = line.strip().lstrip("-").strip()
+            if line:
+                add_moment(chat_id, line, embed(line))
+                count += 1
+
+    return count
+
+
+def learn_context(chat_id):
+    """Analyze whatever this bot has itself captured in the messages table."""
     with get_conn() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -52,30 +142,11 @@ def _generate_person_portraits(chat_id):
                 )
             texts = [row[0] for row in cursor.fetchall()]
 
-        if len(texts) < MIN_MESSAGES_FOR_PORTRAIT:
-            continue
-
-        observations = []
-        for i in range(0, len(texts), PERSON_BATCH_SIZE):
-            batch = texts[i:i + PERSON_BATCH_SIZE]
-            obs = answer_context_question(prompt_for_portrait_map.format(messages="\n".join(batch)))
-            if obs:
-                observations.append(obs)
-
-        if not observations:
-            continue
-
         display_name = resolve_display_name(username, user_name)
-        portrait = answer_context_question(
-            prompt_for_portrait_reduce.format(name=display_name, observations="\n\n".join(observations))
-        )
+        portrait = build_portrait(display_name, texts)
         if portrait:
-            portraits.append(f"Портрет: {display_name} — {portrait.strip()}")
+            portraits.append(portrait)
 
-    return portraits
-
-
-def _generate_cluster_patterns(chat_id):
     with get_conn() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -84,44 +155,7 @@ def _generate_cluster_patterns(chat_id):
         )
         rows = cursor.fetchall()
 
-    if len(rows) < MIN_CLUSTER_SIZE:
-        return []
-
-    texts = [r[0] for r in rows]
-    vectors = normalize([_parse_vector(r[1]) for r in rows])
-
-    # L2-normalized vectors make euclidean distance equivalent to cosine
-    # distance, and sklearn's HDBSCAN is numerically unstable with
-    # metric='cosine' directly (produces overflow/divide-by-zero warnings).
-    clusterer = HDBSCAN(min_cluster_size=MIN_CLUSTER_SIZE, metric='euclidean')
-    labels = clusterer.fit_predict(vectors)
-
-    clusters = defaultdict(list)
-    for label, text in zip(labels, texts):
-        if label == -1:
-            continue
-        clusters[label].append(text)
-
-    patterns = []
-    for members in clusters.values():
-        if len(members) <= MAX_CLUSTER_SAMPLE:
-            sample = members
-        else:
-            step = len(members) // MAX_CLUSTER_SAMPLE
-            sample = members[::step][:MAX_CLUSTER_SAMPLE]
-
-        desc = answer_context_question(
-            prompt_for_cluster_description.format(messages="\n".join(f"- {m}" for m in sample))
-        )
-        if desc and "НЕЗНАЧИМО" not in desc:
-            patterns.append(desc.strip())
-
-    return patterns
-
-
-def learn_context(chat_id):
-    portraits = _generate_person_portraits(chat_id)
-    patterns = _generate_cluster_patterns(chat_id)
+    patterns = cluster_and_describe([(r[0], _parse_vector(r[1])) for r in rows])
 
     delete_auto_notes(chat_id)
     for note in portraits + patterns:
