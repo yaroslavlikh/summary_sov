@@ -1,6 +1,7 @@
 from collections import defaultdict
 
 from sklearn.cluster import HDBSCAN
+from sklearn.decomposition import PCA
 from sklearn.preprocessing import normalize
 
 from chat_context import add_note, delete_auto_notes
@@ -63,6 +64,14 @@ def cluster_and_describe(texts_with_vectors):
 
     texts = [t for t, _ in texts_with_vectors]
     vectors = normalize([v for _, v in texts_with_vectors])
+
+    # HDBSCAN's distance computations degrade badly in high dimensions (our
+    # embeddings are 384-d) -- on tens of thousands of points this can run
+    # for hours. Reducing to ~50 dims via PCA keeps most of the semantic
+    # structure while making the actual clustering tractable.
+    if len(vectors) > 200:
+        target_dim = min(50, len(vectors) - 1)
+        vectors = PCA(n_components=target_dim, random_state=42).fit_transform(vectors)
 
     # L2-normalized vectors make euclidean distance equivalent to cosine
     # distance, and sklearn's HDBSCAN is numerically unstable with
