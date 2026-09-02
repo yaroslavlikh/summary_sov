@@ -8,6 +8,12 @@ API_key = get_groq_api_key()
 PRIMARY_MODEL = "openai/gpt-oss-120b"
 FALLBACK_MODEL = "openai/gpt-oss-20b"
 
+# Bulk history analysis (context_learning.py) can burn hundreds of requests
+# in one run. Groq tracks daily quota separately per model, so giving it its
+# own dedicated model here means it never eats into PRIMARY_MODEL/FALLBACK_MODEL's
+# quota that /summary and /ask depend on.
+CONTEXT_LEARNING_MODEL = "qwen/qwen3.8-27b"
+
 
 def _ask(client, model, full_prompt, temperature):
     response = client.chat.completions.create(
@@ -18,31 +24,35 @@ def _ask(client, model, full_prompt, temperature):
     return response.choices[0].message.content
 
 
-def _complete(full_prompt, temperature):
+def _complete(full_prompt, temperature, models):
     if not API_key:
         print("Ошибка: GROQ_API_KEY не установлен")
         return None
 
     client = Groq(api_key=API_key)
 
-    try:
-        return _ask(client, PRIMARY_MODEL, full_prompt, temperature)
-    except Exception as e:
-        print(f"Ошибка при использовании {PRIMARY_MODEL}: {e}")
-        print(f"Переход на {FALLBACK_MODEL}...")
-
+    last_error = None
+    for model in models:
         try:
-            return _ask(client, FALLBACK_MODEL, full_prompt, temperature)
-        except Exception as e2:
-            print(f"Ошибка при использовании {FALLBACK_MODEL}: {e2}")
-            return None
+            return _ask(client, model, full_prompt, temperature)
+        except Exception as e:
+            print(f"Ошибка при использовании {model}: {e}")
+            last_error = e
+
+    print(f"Все модели недоступны: {last_error}")
+    return None
 
 
-def send_prompt(prompt, max_lines=18):
-    return _complete(prompt_for_llm.format(max_lines=max_lines) + prompt, temperature=0.9)
+def send_prompt(prompt, max_lines=18, group_context=""):
+    full_prompt = prompt_for_llm.format(max_lines=max_lines, group_context=group_context) + prompt
+    return _complete(full_prompt, temperature=0.9, models=[PRIMARY_MODEL, FALLBACK_MODEL])
 
 
 def answer_question(full_prompt):
     # Factual Q&A needs consistent, format-compliant answers, not creative
     # variation -- lower temperature than the summary path.
-    return _complete(full_prompt, temperature=0.3)
+    return _complete(full_prompt, temperature=0.3, models=[PRIMARY_MODEL, FALLBACK_MODEL])
+
+
+def answer_context_question(full_prompt):
+    return _complete(full_prompt, temperature=0.5, models=[CONTEXT_LEARNING_MODEL])
