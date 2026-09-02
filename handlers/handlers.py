@@ -327,12 +327,15 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None):
 
 
 def load_handlers(bot):
+    bot_username = bot.get_me().username
+    mention_tag = f"@{bot_username}".lower() if bot_username else None
 
     @bot.message_handler(func=lambda mess: mess.text and not mess.text.startswith("/"))
     def save_messages(message):
+        if message.from_user.username == IGNORED_USERNAME:
+            return
+
         try:
-            if message.from_user.username == IGNORED_USERNAME:
-                return
             print(f"Получено сообщение: {message.text}")
             reply_message = message.reply_to_message
             replied_text = reply_message.text if reply_message else "Отмеченного сообщения нет"
@@ -348,6 +351,14 @@ def load_handlers(bot):
                 conn.commit()
         except Exception as e:
             print(f"Ошибка при сохранении сообщения: {e}")
+
+        # Mentioning the bot anywhere in a regular message is treated as a
+        # question, same as /ask, without needing the explicit command.
+        if mention_tag and mention_tag in message.text.lower():
+            question = re.sub(re.escape(mention_tag), '', message.text, flags=re.IGNORECASE).strip()
+            if question:
+                replied_message_id = message.reply_to_message.message_id if message.reply_to_message else None
+                answer_chat_question(bot, message.chat.id, question, replied_message_id)
 
     @bot.message_handler(commands=['help'])
     def help_command(message):
