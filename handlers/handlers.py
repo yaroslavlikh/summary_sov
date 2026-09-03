@@ -258,11 +258,14 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None, bot_us
                 anchor_id = row[0]
 
         # Without an explicit reply anchor, a deictic question still refers
-        # to something -- just implicitly, via the recent conversation.
-        # Rewrite it into a self-contained question before searching, so
-        # full-text/vector search has actual vocabulary to work with instead
-        # of "это"/"серьёзно?". A fast, cheap model call: it leaves
-        # already-self-contained questions unchanged.
+        # to something -- just implicitly. Tested empirically against three
+        # shapes of real usage (immediate follow-up, a murky clarification
+        # thread ~15 messages deep, 40 messages of unrelated noise): a local
+        # window alone is too thin for anything but an immediate follow-up,
+        # and a large raw window still has a breaking point tied to how
+        # chatty the group is. Combining the local window with the bot's
+        # own last few answers specifically (tracked by their own recency,
+        # not the raw message count) is what actually held across all three.
         effective_question = question
         if not anchor_id:
             cursor.execute(
@@ -271,14 +274,6 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None, bot_us
             )
             recent_rows = cursor.fetchall()
 
-            # A busy correction/clarification thread can easily push the
-            # relevant exchange outside a 25-message recency window within
-            # minutes -- and the follow-up isn't necessarily about the most
-            # recent thing said, it could be about any of the bot's last
-            # few answers. Pull those in by their own recency (not the raw
-            # message window) so a delayed "это правда?" still has them
-            # available regardless of how much unrelated chatter happened
-            # in between.
             cursor.execute(
                 "SELECT id, user_name, username, message FROM messages WHERE user_id = %s AND is_bot = TRUE ORDER BY id DESC LIMIT 5",
                 (chat_id,),
