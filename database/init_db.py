@@ -21,6 +21,12 @@ def init_db():
         cursor.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS replied_message TEXT DEFAULT NULL;")
         cursor.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS message_id BIGINT;")
         cursor.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS username TEXT;")
+        # The bot's own outgoing /ask answers get saved here too (see
+        # answer_chat_question), so a later reply to the bot -- or an
+        # implicit follow-up like "это правда?" -- has something to anchor
+        # on. is_bot marks those rows so /summary and context_learning.py
+        # can exclude them from what they treat as actual chat content.
+        cursor.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_bot BOOLEAN NOT NULL DEFAULT FALSE;")
         cursor.execute("ALTER TABLE messages ALTER COLUMN user_id TYPE BIGINT;")
 
         # A pre-existing table can also have an `id` column with no
