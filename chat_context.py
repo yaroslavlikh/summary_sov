@@ -1,3 +1,4 @@
+from crypto_utils import decrypt, encrypt
 from database.db import get_conn
 
 
@@ -6,7 +7,7 @@ def add_note(chat_id, note, source='manual'):
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO chat_context (chat_id, note, source) VALUES (%s, %s, %s) RETURNING id",
-            (chat_id, note, source),
+            (chat_id, encrypt(note), source),
         )
         note_id = cursor.fetchone()[0]
         conn.commit()
@@ -20,7 +21,7 @@ def list_notes(chat_id):
             "SELECT id, note FROM chat_context WHERE chat_id = %s ORDER BY id",
             (chat_id,),
         )
-        return cursor.fetchall()
+        return [(note_id, decrypt(note)) for note_id, note in cursor.fetchall()]
 
 
 def remove_note(chat_id, note_id):

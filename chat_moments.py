@@ -1,3 +1,4 @@
+from crypto_utils import decrypt, encrypt
 from database.db import get_conn
 from embeddings import to_vector_literal
 
@@ -7,7 +8,7 @@ def add_moment(chat_id, note, embedding):
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO chat_moments (chat_id, note, embedding) VALUES (%s, %s, %s::vector)",
-            (chat_id, note, to_vector_literal(embedding)),
+            (chat_id, encrypt(note), to_vector_literal(embedding)),
         )
         conn.commit()
 
@@ -31,4 +32,4 @@ def search_moments(chat_id, query_embedding, top_k=5):
             """,
             (chat_id, to_vector_literal(query_embedding), top_k),
         )
-        return [row[0] for row in cursor.fetchall()]
+        return [decrypt(row[0]) for row in cursor.fetchall()]
