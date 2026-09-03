@@ -108,7 +108,7 @@ def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18):
         cursor = conn.cursor()
 
         cursor.execute(
-            "SELECT id FROM messages WHERE user_id = %s ORDER BY id DESC LIMIT 1", (chat_id,)
+            "SELECT id FROM messages WHERE user_id = %s AND is_bot = FALSE ORDER BY id DESC LIMIT 1", (chat_id,)
         )
         last_row = cursor.fetchone()
         if last_row is None:
@@ -121,7 +121,7 @@ def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18):
             N = requested_n
         else:
             cursor.execute(
-                "SELECT COUNT(*) FROM messages WHERE user_id = %s AND id > %s",
+                "SELECT COUNT(*) FROM messages WHERE user_id = %s AND id > %s AND is_bot = FALSE",
                 (chat_id, last_summary_id),
             )
             N = cursor.fetchone()[0]
@@ -134,7 +134,7 @@ def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18):
             """
             SELECT id, message_id, user_name, username, message, replied_message
             FROM messages
-            WHERE user_id = %s
+            WHERE user_id = %s AND is_bot = FALSE
             ORDER BY id DESC
             LIMIT %s
             """,
@@ -216,7 +216,30 @@ def _rrf_fuse(ranked_lists, k=60):
     return sorted(scores, key=scores.get, reverse=True)
 
 
-def answer_chat_question(bot, chat_id, question, replied_message_id=None):
+def _save_bot_answer(chat_id, sent_message_id, bot_username, plain_text):
+    # Outgoing bot messages never pass through save_messages (that only
+    # fires on incoming Telegram updates), so without this a reply to the
+    # bot's own answer -- or an implicit follow-up like "это правда?" --
+    # has nothing in `messages` to anchor on. is_bot=TRUE keeps it out of
+    # /summary and context_learning.py, which only care about actual
+    # participants.
+    try:
+        with get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO messages (user_id, user_name, username, message, replied_message, message_id, embedding, search_vector, is_bot) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, to_tsvector('russian', %s), TRUE)",
+                (
+                    chat_id, "Бот", bot_username, encrypt(plain_text), None, sent_message_id,
+                    to_vector_literal(embed(plain_text)), plain_text,
+                ),
+            )
+            conn.commit()
+    except Exception as e:
+        print(f"Ошибка при сохранении ответа бота: {e}")
+
+
+def answer_chat_question(bot, chat_id, question, replied_message_id=None, bot_username=None):
     with get_conn() as conn:
         cursor = conn.cursor()
 
@@ -387,7 +410,8 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None):
         return
 
     formatted = format_summary_html(res, legend)
-    bot.send_message(chat_id, formatted, parse_mode='HTML')
+    sent = bot.send_message(chat_id, formatted, parse_mode='HTML')
+    _save_bot_answer(chat_id, sent.message_id, bot_username, strip_citations(res))
 
 
 def load_handlers(bot):
@@ -429,7 +453,7 @@ def load_handlers(bot):
             question = re.sub(re.escape(mention_tag), '', message.text, flags=re.IGNORECASE).strip()
             if question:
                 replied_message_id = message.reply_to_message.message_id if message.reply_to_message else None
-                answer_chat_question(bot, message.chat.id, question, replied_message_id)
+                answer_chat_question(bot, message.chat.id, question, replied_message_id, bot_username)
 
     @bot.message_handler(commands=['help'])
     def help_command(message):
@@ -558,7 +582,7 @@ def load_handlers(bot):
 
         question = dt[1]
         replied_message_id = message.reply_to_message.message_id if message.reply_to_message else None
-        answer_chat_question(bot, message.chat.id, question, replied_message_id)
+        answer_chat_question(bot, message.chat.id, question, replied_message_id, bot_username)
 
     @bot.message_handler(commands=['addcontext'])
     def add_context_cmd(message):

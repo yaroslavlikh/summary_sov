@@ -131,7 +131,7 @@ def learn_context(chat_id):
     with get_conn() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT DISTINCT user_name, username FROM messages WHERE user_id = %s",
+            "SELECT DISTINCT user_name, username FROM messages WHERE user_id = %s AND is_bot = FALSE",
             (chat_id,),
         )
         people = cursor.fetchall()
@@ -142,12 +142,12 @@ def learn_context(chat_id):
             cursor = conn.cursor()
             if username:
                 cursor.execute(
-                    "SELECT message FROM messages WHERE user_id = %s AND username = %s ORDER BY id",
+                    "SELECT message FROM messages WHERE user_id = %s AND username = %s AND is_bot = FALSE ORDER BY id",
                     (chat_id, username),
                 )
             else:
                 cursor.execute(
-                    "SELECT message FROM messages WHERE user_id = %s AND username IS NULL AND user_name = %s ORDER BY id",
+                    "SELECT message FROM messages WHERE user_id = %s AND username IS NULL AND user_name = %s AND is_bot = FALSE ORDER BY id",
                     (chat_id, user_name),
                 )
             texts = [decrypt(row[0]) for row in cursor.fetchall()]
@@ -160,7 +160,7 @@ def learn_context(chat_id):
     with get_conn() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT message, embedding FROM messages WHERE user_id = %s AND embedding IS NOT NULL ORDER BY id",
+            "SELECT message, embedding FROM messages WHERE user_id = %s AND embedding IS NOT NULL AND is_bot = FALSE ORDER BY id",
             (chat_id,),
         )
         rows = cursor.fetchall()
