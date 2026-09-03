@@ -266,14 +266,33 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None, bot_us
         effective_question = question
         if not anchor_id:
             cursor.execute(
-                "SELECT user_name, username, message FROM messages WHERE user_id = %s ORDER BY id DESC LIMIT 25",
+                "SELECT id, user_name, username, message FROM messages WHERE user_id = %s ORDER BY id DESC LIMIT 25",
                 (chat_id,),
             )
-            recent_rows = cursor.fetchall()[::-1]
-            if recent_rows:
+            recent_rows = cursor.fetchall()
+
+            # A busy correction/clarification thread can easily push the
+            # relevant exchange outside a 25-message recency window within
+            # minutes -- and the follow-up isn't necessarily about the most
+            # recent thing said, it could be about any of the bot's last
+            # few answers. Pull those in by their own recency (not the raw
+            # message window) so a delayed "это правда?" still has them
+            # available regardless of how much unrelated chatter happened
+            # in between.
+            cursor.execute(
+                "SELECT id, user_name, username, message FROM messages WHERE user_id = %s AND is_bot = TRUE ORDER BY id DESC LIMIT 5",
+                (chat_id,),
+            )
+            bot_rows = cursor.fetchall()
+
+            combined = {row[0]: row for row in recent_rows}
+            combined.update({row[0]: row for row in bot_rows})
+            ordered_rows = [combined[k] for k in sorted(combined)]
+
+            if ordered_rows:
                 context_lines = [
                     f"{resolve_display_name(username, user_name)}: {decrypt(text)}"
-                    for user_name, username, text in recent_rows
+                    for _, user_name, username, text in ordered_rows
                 ]
                 rewritten = rewrite_query(question, context_lines)
                 if rewritten:
