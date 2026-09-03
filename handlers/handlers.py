@@ -5,6 +5,7 @@ import threading
 from chat_context import add_note, get_context_block, list_notes, remove_note
 from chat_moments import search_moments
 from context_learning import learn_context
+from crypto_utils import decrypt, encrypt
 from database.db import get_conn
 from display_names import resolve_display_name
 from embeddings import embed, to_vector_literal
@@ -149,9 +150,10 @@ def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18):
         for idx, (_, msg_id, user_name, username, text, replied) in enumerate(rows, start=1):
             legend[idx] = build_message_link(chat_id, msg_id)
             author = resolve_display_name(username, user_name)
-            entry = f"[{idx}] {author}: {text}"
-            if replied and replied != "Отмеченного сообщения нет":
-                entry += f" (ответ на: {replied})"
+            entry = f"[{idx}] {author}: {decrypt(text)}"
+            replied_plain = decrypt(replied)
+            if replied_plain and replied_plain != "Отмеченного сообщения нет":
+                entry += f" (ответ на: {replied_plain})"
             lines.append(entry)
 
         prompt_body = ""
@@ -232,30 +234,26 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None):
             )
             match_ids.update(row[0] for row in cursor.fetchall())
 
-        # Full-text: match against a chunk (the message + 3 neighbors on each
-        # side) instead of the message alone. This catches discussions where
-        # the relevant words are spread across a few adjacent replies rather
-        # than sitting together in one message.
+        # Full-text: match each message's own precomputed search_vector.
+        # (Previously this matched a live-concatenated +-3 chunk of raw
+        # message text, but message is now stored encrypted, so tsvector
+        # can no longer be computed on the fly from it -- only the
+        # precomputed per-message search_vector, built from plaintext at
+        # insert time, is available. The post-match +-3 window expansion
+        # below still pulls in neighboring context either way.)
         or_query = _build_or_query(cursor, question)
         if or_query:
             cursor.execute(
                 """
-                WITH windowed AS (
-                    SELECT id, string_agg(message, ' ') OVER (
-                        ORDER BY id ROWS BETWEEN 3 PRECEDING AND 3 FOLLOWING
-                    ) AS chunk_text
-                    FROM messages
-                    WHERE user_id = %s
-                )
                 SELECT id FROM (
-                    SELECT id, ts_rank(to_tsvector('russian', chunk_text), to_tsquery('russian', %s)) AS rank
-                    FROM windowed
-                    WHERE to_tsvector('russian', chunk_text) @@ to_tsquery('russian', %s)
+                    SELECT id, ts_rank(search_vector, to_tsquery('russian', %s)) AS rank
+                    FROM messages
+                    WHERE user_id = %s AND search_vector @@ to_tsquery('russian', %s)
                     ORDER BY rank DESC
                     LIMIT 4
                 ) top_matches
                 """,
-                (chat_id, or_query, or_query),
+                (or_query, chat_id, or_query),
             )
             match_ids.update(row[0] for row in cursor.fetchall())
 
@@ -305,7 +303,7 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None):
         legend[idx] = build_message_link(chat_id, msg_id)
         author = resolve_display_name(username, user_name)
         tag = " [СООБЩЕНИЕ, НА КОТОРОЕ ОТВЕЧАЛИ]" if row_id == anchor_id else ""
-        lines.append(f"[{idx}] {author}: {text}{tag}")
+        lines.append(f"[{idx}] {author}: {decrypt(text)}{tag}")
 
     group_context = build_group_context_prompt_section(chat_id)
     relevant_moments = search_moments(chat_id, question_embedding, top_k=5)
@@ -341,12 +339,19 @@ def load_handlers(bot):
             replied_text = reply_message.text if reply_message else "Отмеченного сообщения нет"
             user_name = message.from_user.first_name
             embedding_literal = to_vector_literal(embed(message.text))
+            # search_vector must be computed from the plaintext explicitly
+            # now -- message stores encrypted ciphertext, so Postgres can no
+            # longer derive it automatically the way a GENERATED column did.
             with get_conn() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "INSERT INTO messages (user_id, user_name, username, message, replied_message, message_id, embedding) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                    (message.chat.id, user_name, message.from_user.username, message.text, replied_text, message.message_id, embedding_literal),
+                    "INSERT INTO messages (user_id, user_name, username, message, replied_message, message_id, embedding, search_vector) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, to_tsvector('russian', %s))",
+                    (
+                        message.chat.id, user_name, message.from_user.username,
+                        encrypt(message.text), encrypt(replied_text), message.message_id,
+                        embedding_literal, message.text,
+                    ),
                 )
                 conn.commit()
         except Exception as e:

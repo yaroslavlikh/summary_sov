@@ -67,6 +67,12 @@ def init_db():
             ALTER TABLE messages ADD COLUMN IF NOT EXISTS search_vector tsvector
                 GENERATED ALWAYS AS (to_tsvector('russian', coalesce(message, ''))) STORED;
         """)
+        # message now holds encrypted ciphertext, so search_vector can no
+        # longer be derived from it automatically -- convert the generated
+        # column into a plain one (keeps whatever values it already has) so
+        # the application can populate it from plaintext at insert time
+        # instead, before encrypting.
+        cursor.execute("ALTER TABLE messages ALTER COLUMN search_vector DROP EXPRESSION IF EXISTS;")
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS messages_search_idx ON messages USING GIN (search_vector);
         """)

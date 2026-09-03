@@ -6,6 +6,7 @@ from sklearn.preprocessing import normalize
 
 from chat_context import add_note, delete_auto_notes
 from chat_moments import add_moment, delete_all_moments
+from crypto_utils import decrypt
 from database.db import get_conn
 from display_names import resolve_display_name
 from embeddings import embed
@@ -149,7 +150,7 @@ def learn_context(chat_id):
                     "SELECT message FROM messages WHERE user_id = %s AND username IS NULL AND user_name = %s ORDER BY id",
                     (chat_id, user_name),
                 )
-            texts = [row[0] for row in cursor.fetchall()]
+            texts = [decrypt(row[0]) for row in cursor.fetchall()]
 
         display_name = resolve_display_name(username, user_name)
         portrait = build_portrait(display_name, texts)
@@ -164,7 +165,7 @@ def learn_context(chat_id):
         )
         rows = cursor.fetchall()
 
-    patterns = cluster_and_describe([(r[0], _parse_vector(r[1])) for r in rows])
+    patterns = cluster_and_describe([(decrypt(r[0]), _parse_vector(r[1])) for r in rows])
 
     delete_auto_notes(chat_id)
     for note in portraits + patterns:
