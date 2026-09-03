@@ -243,7 +243,7 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None):
         effective_question = question
         if not anchor_id:
             cursor.execute(
-                "SELECT user_name, username, message FROM messages WHERE user_id = %s ORDER BY id DESC LIMIT 8",
+                "SELECT user_name, username, message FROM messages WHERE user_id = %s ORDER BY id DESC LIMIT 25",
                 (chat_id,),
             )
             recent_rows = cursor.fetchall()[::-1]
