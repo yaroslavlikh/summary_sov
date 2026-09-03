@@ -1,6 +1,7 @@
 import html
 import re
 import threading
+from collections import defaultdict
 
 from chat_context import add_note, get_context_block, list_notes, remove_note
 from chat_moments import search_moments
@@ -9,7 +10,7 @@ from crypto_utils import decrypt, encrypt
 from database.db import get_conn
 from display_names import resolve_display_name
 from embeddings import embed, to_vector_literal
-from llm.groq_client import answer_question, send_prompt
+from llm.groq_client import answer_question, rerank_candidates, rewrite_query, send_prompt
 from llm.prompt import prompt_for_qa
 from mention_groups import (
     add_to_group,
@@ -203,17 +204,27 @@ def _build_or_query(cursor, question):
     return " | ".join(f"'{lex}'" for lex in lexemes) or None
 
 
+def _rrf_fuse(ranked_lists, k=60):
+    """Reciprocal Rank Fusion: combine several ranked id lists into one
+    score per id (1/(k+rank), summed across lists) instead of a flat set
+    union, so ids ranked well by multiple sources (or very well by one)
+    surface above single weak matches. Returns ids sorted best-first."""
+    scores = defaultdict(float)
+    for ranked in ranked_lists:
+        for rank, item_id in enumerate(ranked, start=1):
+            scores[item_id] += 1.0 / (k + rank)
+    return sorted(scores, key=scores.get, reverse=True)
+
+
 def answer_chat_question(bot, chat_id, question, replied_message_id=None):
     with get_conn() as conn:
         cursor = conn.cursor()
-
-        match_ids = set()
-        anchor_id = None
 
         # A short/deictic question ("это правда?", "серьёзно?") carries no
         # useful search keywords on its own — it refers to whatever was just
         # replied to. Anchor on that directly instead of relying on search
         # to guess, and remember it so we can flag it for the model below.
+        anchor_id = None
         if replied_message_id:
             cursor.execute(
                 "SELECT id FROM messages WHERE user_id = %s AND message_id = %s",
@@ -222,62 +233,117 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None):
             row = cursor.fetchone()
             if row:
                 anchor_id = row[0]
-                match_ids.add(anchor_id)
 
-        # Only fall back to "recent messages" when there's no explicit reply
-        # anchor — otherwise it just floods the context with noise that can
-        # outweigh the one message the user actually pointed at.
+        # Without an explicit reply anchor, a deictic question still refers
+        # to something -- just implicitly, via the recent conversation.
+        # Rewrite it into a self-contained question before searching, so
+        # full-text/vector search has actual vocabulary to work with instead
+        # of "это"/"серьёзно?". A fast, cheap model call: it leaves
+        # already-self-contained questions unchanged.
+        effective_question = question
         if not anchor_id:
             cursor.execute(
-                "SELECT id FROM messages WHERE user_id = %s ORDER BY id DESC LIMIT 10",
+                "SELECT user_name, username, message FROM messages WHERE user_id = %s ORDER BY id DESC LIMIT 8",
                 (chat_id,),
             )
-            match_ids.update(row[0] for row in cursor.fetchall())
+            recent_rows = cursor.fetchall()[::-1]
+            if recent_rows:
+                context_lines = [
+                    f"{resolve_display_name(username, user_name)}: {decrypt(text)}"
+                    for user_name, username, text in recent_rows
+                ]
+                rewritten = rewrite_query(question, context_lines)
+                if rewritten:
+                    effective_question = rewritten
 
-        # Full-text: match each message's own precomputed search_vector.
-        # (Previously this matched a live-concatenated +-3 chunk of raw
-        # message text, but message is now stored encrypted, so tsvector
-        # can no longer be computed on the fly from it -- only the
-        # precomputed per-message search_vector, built from plaintext at
-        # insert time, is available. The post-match +-3 window expansion
-        # below still pulls in neighboring context either way.)
-        or_query = _build_or_query(cursor, question)
+        # Full-text: ranked list, best match first. Matches each message's
+        # own precomputed search_vector (message is stored encrypted, so
+        # tsvector can no longer be derived live from it the way a window
+        # concatenation once did -- only the precomputed per-message
+        # search_vector, built from plaintext at insert time, is available).
+        or_query = _build_or_query(cursor, effective_question)
+        fts_ids = []
         if or_query:
             cursor.execute(
                 """
-                SELECT id FROM (
-                    SELECT id, ts_rank(search_vector, to_tsquery('russian', %s)) AS rank
-                    FROM messages
-                    WHERE user_id = %s AND search_vector @@ to_tsquery('russian', %s)
-                    ORDER BY rank DESC
-                    LIMIT 4
-                ) top_matches
+                SELECT id FROM messages
+                WHERE user_id = %s AND search_vector @@ to_tsquery('russian', %s)
+                ORDER BY ts_rank(search_vector, to_tsquery('russian', %s)) DESC
+                LIMIT 8
                 """,
-                (or_query, chat_id, or_query),
+                (chat_id, or_query, or_query),
             )
-            match_ids.update(row[0] for row in cursor.fetchall())
+            fts_ids = [row[0] for row in cursor.fetchall()]
 
-        # Semantic: catches paraphrased questions that share no vocabulary
-        # with the messages that actually answer them.
-        question_embedding = embed(question)
+        # Semantic: ranked list, closest first. Catches paraphrased questions
+        # that share no vocabulary with the messages that actually answer them.
+        question_embedding = embed(effective_question)
         cursor.execute(
             """
             SELECT id FROM messages
             WHERE user_id = %s AND embedding IS NOT NULL
             ORDER BY embedding <=> %s::vector
-            LIMIT 4
+            LIMIT 8
             """,
             (chat_id, to_vector_literal(question_embedding)),
         )
-        match_ids.update(row[0] for row in cursor.fetchall())
+        vector_ids = [row[0] for row in cursor.fetchall()]
 
-        if not match_ids:
+        fused_ids = _rrf_fuse([fts_ids, vector_ids])
+
+        # Only fall back to "recent messages" when neither search signal
+        # found anything at all -- otherwise it just floods the context
+        # with noise that can outweigh what search actually found.
+        if not fused_ids and not anchor_id:
+            cursor.execute(
+                "SELECT id FROM messages WHERE user_id = %s ORDER BY id DESC LIMIT 10",
+                (chat_id,),
+            )
+            fused_ids = [row[0] for row in cursor.fetchall()]
+
+        candidate_ids = fused_ids[:10]
+        if anchor_id and anchor_id not in candidate_ids:
+            candidate_ids = [anchor_id] + candidate_ids
+
+        if not candidate_ids:
             bot.send_message(chat_id, "В истории чата не нашёл ничего похожего на этот вопрос.")
             return
 
-        # Expand the same +-3 window for display, so the model sees the
-        # actual per-message text (with correct citation numbers), not the
-        # concatenated blob used just for matching.
+        cursor.execute(
+            """
+            SELECT id, message_id, user_name, username, message
+            FROM messages
+            WHERE user_id = %s AND id = ANY(%s)
+            ORDER BY id ASC
+            """,
+            (chat_id, candidate_ids),
+        )
+        candidate_rows = cursor.fetchall()
+
+        # Rerank: one fast-model pass over the candidate pool picking only
+        # the messages that actually help answer the question (not just
+        # share vocabulary), instead of window-expanding every RRF match and
+        # risking the context-flooding that broke citations before. Fails
+        # open to the unfiltered candidates if the model returns nothing
+        # parseable -- the final QA prompt has its own "couldn't find it"
+        # fallback, so it's safe to let it make that call instead.
+        match_ids = {row[0] for row in candidate_rows}
+        if len(candidate_rows) > 1:
+            numbered = "\n".join(
+                f"[{row_id}] {resolve_display_name(username, user_name)}: {decrypt(text)}"
+                for row_id, _, user_name, username, text in candidate_rows
+            )
+            reranked = rerank_candidates(effective_question, numbered)
+            valid_ids = match_ids
+            reranked_ids = [i for i in (int(n) for n in re.findall(r'\d+', reranked or "")) if i in valid_ids][:5]
+            if reranked_ids:
+                match_ids = set(reranked_ids)
+        if anchor_id:
+            match_ids.add(anchor_id)
+
+        # Expand +-3 window for display, so the model sees the actual
+        # per-message text (with correct citation numbers), not just the
+        # bare matches.
         window_ids = set()
         for match_id in match_ids:
             window_ids.update(range(match_id - 3, match_id + 4))

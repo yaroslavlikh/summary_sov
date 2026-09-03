@@ -1,7 +1,7 @@
 from groq import Groq
 
 from config import get_groq_api_key
-from llm.prompt import prompt_for_llm
+from llm.prompt import prompt_for_llm, prompt_for_query_rewrite, prompt_for_rerank
 
 API_key = get_groq_api_key()
 
@@ -56,3 +56,19 @@ def answer_question(full_prompt):
 
 def answer_context_question(full_prompt):
     return _complete(full_prompt, temperature=0.5, models=[CONTEXT_LEARNING_MODEL])
+
+
+# Both of these are small, single-purpose calls on the retrieval hot path
+# (not the final answer) -- FALLBACK_MODEL alone (gpt-oss-20b, ~900+ tok/s on
+# Groq) keeps them cheap and fast rather than pulling in PRIMARY_MODEL.
+
+def rewrite_query(question, context_lines):
+    context = "\n".join(context_lines)
+    full_prompt = prompt_for_query_rewrite.format(context=context, question=question)
+    result = _complete(full_prompt, temperature=0.2, models=[FALLBACK_MODEL])
+    return result.strip() if result else None
+
+
+def rerank_candidates(question, numbered_messages):
+    full_prompt = prompt_for_rerank.format(question=question, messages=numbered_messages)
+    return _complete(full_prompt, temperature=0.0, models=[FALLBACK_MODEL])
