@@ -36,3 +36,10 @@ def get_database_url():
     if not url:
         print("Ошибка: DATABASE_URL не найден в .env файле")
     return url
+
+
+def get_encryption_key():
+    key = os.getenv('MESSAGE_ENCRYPTION_KEY')
+    if not key:
+        print("Ошибка: MESSAGE_ENCRYPTION_KEY не найден в .env файле")
+    return key
