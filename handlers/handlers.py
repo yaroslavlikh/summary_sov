@@ -257,17 +257,30 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None, bot_us
             if row:
                 anchor_id = row[0]
 
-        # Without an explicit reply anchor, a deictic question still refers
-        # to something -- just implicitly. Tested empirically against three
-        # shapes of real usage (immediate follow-up, a murky clarification
-        # thread ~15 messages deep, 40 messages of unrelated noise): a local
-        # window alone is too thin for anything but an immediate follow-up,
-        # and a large raw window still has a breaking point tied to how
-        # chatty the group is. Combining the local window with the bot's
-        # own last few answers specifically (tracked by their own recency,
-        # not the raw message count) is what actually held across all three.
         effective_question = question
-        if not anchor_id:
+
+        if anchor_id:
+            # A reply is a strong, deterministic signal -- searching on top
+            # of it, especially for a deictic question like "это правда?"
+            # that carries no real vocabulary of its own, only risks mixing
+            # the anchor with unrelated keyword matches (literal "правда")
+            # and confusing citation numbering between them. This was a
+            # real bug: the anchor was found correctly but still got
+            # outranked/misattributed once weak FTS matches sat alongside
+            # it as candidates. Trust the anchor exclusively; the +-3 window
+            # below still gives the model surrounding context around it.
+            match_ids = {anchor_id}
+        else:
+            # No explicit anchor -- a deictic question still refers to
+            # something, just implicitly. Tested empirically against three
+            # shapes of real usage (immediate follow-up, a murky
+            # clarification thread ~15 messages deep, 40 messages of
+            # unrelated noise): a local window alone is too thin for
+            # anything but an immediate follow-up, and a large raw window
+            # still has a breaking point tied to how chatty the group is.
+            # Combining the local window with the bot's own last few
+            # answers specifically (tracked by their own recency, not the
+            # raw message count) is what actually held across all three.
             cursor.execute(
                 "SELECT id, user_name, username, message FROM messages WHERE user_id = %s ORDER BY id DESC LIMIT 25",
                 (chat_id,),
@@ -293,90 +306,88 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None, bot_us
                 if rewritten:
                     effective_question = rewritten
 
-        # Full-text: ranked list, best match first. Matches each message's
-        # own precomputed search_vector (message is stored encrypted, so
-        # tsvector can no longer be derived live from it the way a window
-        # concatenation once did -- only the precomputed per-message
-        # search_vector, built from plaintext at insert time, is available).
-        or_query = _build_or_query(cursor, effective_question)
-        fts_ids = []
-        if or_query:
+            # Full-text: ranked list, best match first. Matches each
+            # message's own precomputed search_vector (message is stored
+            # encrypted, so tsvector can no longer be derived live from it
+            # the way a window concatenation once did -- only the
+            # precomputed per-message search_vector, built from plaintext
+            # at insert time, is available).
+            or_query = _build_or_query(cursor, effective_question)
+            fts_ids = []
+            if or_query:
+                cursor.execute(
+                    """
+                    SELECT id FROM messages
+                    WHERE user_id = %s AND search_vector @@ to_tsquery('russian', %s)
+                    ORDER BY ts_rank(search_vector, to_tsquery('russian', %s)) DESC
+                    LIMIT 8
+                    """,
+                    (chat_id, or_query, or_query),
+                )
+                fts_ids = [row[0] for row in cursor.fetchall()]
+
+            # Semantic: ranked list, closest first. Catches paraphrased
+            # questions that share no vocabulary with the messages that
+            # actually answer them.
+            question_embedding = embed(effective_question)
             cursor.execute(
                 """
                 SELECT id FROM messages
-                WHERE user_id = %s AND search_vector @@ to_tsquery('russian', %s)
-                ORDER BY ts_rank(search_vector, to_tsquery('russian', %s)) DESC
+                WHERE user_id = %s AND embedding IS NOT NULL
+                ORDER BY embedding <=> %s::vector
                 LIMIT 8
                 """,
-                (chat_id, or_query, or_query),
+                (chat_id, to_vector_literal(question_embedding)),
             )
-            fts_ids = [row[0] for row in cursor.fetchall()]
+            vector_ids = [row[0] for row in cursor.fetchall()]
 
-        # Semantic: ranked list, closest first. Catches paraphrased questions
-        # that share no vocabulary with the messages that actually answer them.
-        question_embedding = embed(effective_question)
-        cursor.execute(
-            """
-            SELECT id FROM messages
-            WHERE user_id = %s AND embedding IS NOT NULL
-            ORDER BY embedding <=> %s::vector
-            LIMIT 8
-            """,
-            (chat_id, to_vector_literal(question_embedding)),
-        )
-        vector_ids = [row[0] for row in cursor.fetchall()]
+            fused_ids = _rrf_fuse([fts_ids, vector_ids])
 
-        fused_ids = _rrf_fuse([fts_ids, vector_ids])
+            # Only fall back to "recent messages" when neither search
+            # signal found anything at all -- otherwise it just floods the
+            # context with noise that can outweigh what search actually found.
+            if not fused_ids:
+                cursor.execute(
+                    "SELECT id FROM messages WHERE user_id = %s ORDER BY id DESC LIMIT 10",
+                    (chat_id,),
+                )
+                fused_ids = [row[0] for row in cursor.fetchall()]
 
-        # Only fall back to "recent messages" when neither search signal
-        # found anything at all -- otherwise it just floods the context
-        # with noise that can outweigh what search actually found.
-        if not fused_ids and not anchor_id:
+            candidate_ids = fused_ids[:10]
+            if not candidate_ids:
+                bot.send_message(chat_id, "В истории чата не нашёл ничего похожего на этот вопрос.")
+                return
+
             cursor.execute(
-                "SELECT id FROM messages WHERE user_id = %s ORDER BY id DESC LIMIT 10",
-                (chat_id,),
+                """
+                SELECT id, message_id, user_name, username, message
+                FROM messages
+                WHERE user_id = %s AND id = ANY(%s)
+                ORDER BY id ASC
+                """,
+                (chat_id, candidate_ids),
             )
-            fused_ids = [row[0] for row in cursor.fetchall()]
+            candidate_rows = cursor.fetchall()
 
-        candidate_ids = fused_ids[:10]
-        if anchor_id and anchor_id not in candidate_ids:
-            candidate_ids = [anchor_id] + candidate_ids
-
-        if not candidate_ids:
-            bot.send_message(chat_id, "В истории чата не нашёл ничего похожего на этот вопрос.")
-            return
-
-        cursor.execute(
-            """
-            SELECT id, message_id, user_name, username, message
-            FROM messages
-            WHERE user_id = %s AND id = ANY(%s)
-            ORDER BY id ASC
-            """,
-            (chat_id, candidate_ids),
-        )
-        candidate_rows = cursor.fetchall()
-
-        # Rerank: one fast-model pass over the candidate pool picking only
-        # the messages that actually help answer the question (not just
-        # share vocabulary), instead of window-expanding every RRF match and
-        # risking the context-flooding that broke citations before. Fails
-        # open to the unfiltered candidates if the model returns nothing
-        # parseable -- the final QA prompt has its own "couldn't find it"
-        # fallback, so it's safe to let it make that call instead.
-        match_ids = {row[0] for row in candidate_rows}
-        if len(candidate_rows) > 1:
-            numbered = "\n".join(
-                f"[{row_id}] {resolve_display_name(username, user_name)}: {decrypt(text)}"
-                for row_id, _, user_name, username, text in candidate_rows
-            )
-            reranked = rerank_candidates(effective_question, numbered)
-            valid_ids = match_ids
-            reranked_ids = [i for i in (int(n) for n in re.findall(r'\d+', reranked or "")) if i in valid_ids][:5]
-            if reranked_ids:
-                match_ids = set(reranked_ids)
-        if anchor_id:
-            match_ids.add(anchor_id)
+            # Rerank: one fast-model pass over the candidate pool picking
+            # only the messages that actually help answer the question (not
+            # just share vocabulary), instead of window-expanding every RRF
+            # match and risking the context-flooding that broke citations
+            # before. Fails open to the unfiltered candidates if the model
+            # returns nothing parseable -- the final QA prompt has its own
+            # "couldn't find it" fallback, so it's safe to let it make that
+            # call instead.
+            match_ids = {row[0] for row in candidate_rows}
+            if len(candidate_rows) > 1:
+                numbered = "\n".join(
+                    f"[{row_id}] {resolve_display_name(username, user_name)}: {decrypt(text)}"
+                    for row_id, _, user_name, username, text in candidate_rows
+                )
+                reranked = rerank_candidates(effective_question, numbered)
+                valid_ids = match_ids
+                reranked_ids = [i for i in (int(n) for n in re.findall(r'\d+', reranked or "")) if i in valid_ids][:5]
+                if reranked_ids:
+                    match_ids = set(reranked_ids)
 
         # Expand +-3 window for display, so the model sees the actual
         # per-message text (with correct citation numbers), not just the
@@ -409,7 +420,12 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None, bot_us
         lines.append(f"[{idx}] {author}: {decrypt(text)}{tag}")
 
     group_context = build_group_context_prompt_section(chat_id)
-    relevant_moments = search_moments(chat_id, question_embedding, top_k=5)
+    # Moments search always runs off the ORIGINAL question's embedding, not
+    # effective_question -- when there's an anchor, effective_question was
+    # never rewritten (search was skipped entirely in favor of the anchor),
+    # and moments retrieval still benefits from whatever semantic signal
+    # the raw question carries.
+    relevant_moments = search_moments(chat_id, embed(question), top_k=5)
     if relevant_moments:
         group_context += (
             "\nВозможно релевантные моменты из истории (мнения/настроения/шутки, "
