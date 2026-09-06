@@ -510,10 +510,13 @@ def load_handlers(bot):
             try:
                 media = message.voice or message.video_note
                 audio_bytes = _download_bytes(media.file_id)
-                text = transcribe(audio_bytes)
-                if not text:
+                transcript = transcribe(audio_bytes)
+                if not transcript:
                     return
-                print(f"Расшифровано голосовое: {text}")
+                print(f"Расшифровано голосовое: {transcript}")
+                # Voice messages (not video notes) can carry their own typed
+                # caption alongside the audio -- keep it, same as photos.
+                text = f"{message.caption}\n{transcript}" if message.caption else transcript
                 reply_message = message.reply_to_message
                 replied_text = reply_message.text if reply_message else "Отмеченного сообщения нет"
                 _save_incoming_message(
@@ -546,11 +549,18 @@ def load_handlers(bot):
 
                 image_bytes = _download_bytes(file_id)
                 image_b64 = base64.b64encode(image_bytes).decode('utf-8')
-                caption = caption_image(image_b64)
-                if not caption:
+                image_description = caption_image(image_b64)
+                if not image_description:
                     return
-                print(f"Описано {tag}: {caption}")
-                text = f"[{tag}] {caption.strip()}"
+                print(f"Описано {tag}: {image_description}")
+                # message.caption is the human's own typed text alongside
+                # the photo/sticker (Telegram keeps it separate from
+                # message.text) -- without it, whatever they actually said
+                # is silently dropped and only the AI-generated description
+                # gets saved.
+                text = f"[{tag}: {image_description.strip()}]"
+                if message.caption:
+                    text = f"{message.caption}\n{text}"
                 reply_message = message.reply_to_message
                 replied_text = reply_message.text if reply_message else "Отмеченного сообщения нет"
                 _save_incoming_message(
