@@ -8,6 +8,7 @@ from embeddings import warm_up
 from handlers.handlers import load_handlers
 from database.init_db import init_db
 from scheduler import start_scheduler
+from voice_transcription import warm_up as warm_up_whisper
 from webhook_server import create_app
 
 import urllib3
@@ -48,6 +49,13 @@ def start_app():
         print("Модель эмбеддингов загружена")
     except Exception as e:
         print(f"Ошибка при загрузке модели эмбеддингов: {e}")
+        return
+    try:
+        print("Прогреваю модель Whisper...")
+        warm_up_whisper()
+        print("Модель Whisper загружена")
+    except Exception as e:
+        print(f"Ошибка при загрузке модели Whisper: {e}")
         return
     domain = os.getenv('RAILWAY_PUBLIC_DOMAIN')
     if not domain:

@@ -1,7 +1,9 @@
+import re
+
 from groq import Groq
 
 from config import get_groq_api_key
-from llm.prompt import prompt_for_llm, prompt_for_query_rewrite, prompt_for_rerank
+from llm.prompt import prompt_for_image_caption, prompt_for_llm, prompt_for_query_rewrite, prompt_for_rerank
 
 API_key = get_groq_api_key()
 
@@ -13,6 +15,12 @@ FALLBACK_MODEL = "openai/gpt-oss-20b"
 # own dedicated model here means it never eats into PRIMARY_MODEL/FALLBACK_MODEL's
 # quota that /summary and /ask depend on.
 CONTEXT_LEARNING_MODEL = "qwen/qwen3.8-27b"
+
+# gpt-oss models are text-only; these two qwen variants are the only
+# vision-capable models on Groq. Using the OTHER one from CONTEXT_LEARNING_MODEL
+# keeps photo/sticker captioning (which can happen far more often, on every
+# image message) from competing with context-learning's quota.
+VISION_MODEL = "qwen/qwen3.6-27b"
 
 
 def _ask(client, model, full_prompt, temperature):
@@ -72,3 +80,31 @@ def rewrite_query(question, context_lines):
 def rerank_candidates(question, numbered_messages):
     full_prompt = prompt_for_rerank.format(question=question, messages=numbered_messages)
     return _complete(full_prompt, temperature=0.0, models=[FALLBACK_MODEL])
+
+
+def caption_image(image_b64):
+    if not API_key:
+        print("Ошибка: GROQ_API_KEY не установлен")
+        return None
+
+    client = Groq(api_key=API_key)
+    try:
+        response = client.chat.completions.create(
+            model=VISION_MODEL,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt_for_image_caption},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+                ],
+            }],
+            temperature=0.3,
+        )
+        content = response.choices[0].message.content
+        # This vision model is a reasoning model that prepends its
+        # chain-of-thought in a <think> block -- only the text after it is
+        # the actual caption.
+        return re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip() if content else None
+    except Exception as e:
+        print(f"Ошибка при описании изображения: {e}")
+        return None

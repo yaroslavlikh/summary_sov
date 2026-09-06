@@ -1,3 +1,4 @@
+import base64
 import html
 import re
 import threading
@@ -10,7 +11,7 @@ from crypto_utils import decrypt, encrypt
 from database.db import get_conn
 from display_names import resolve_display_name
 from embeddings import embed, to_vector_literal
-from llm.groq_client import answer_question, rerank_candidates, rewrite_query, send_prompt
+from llm.groq_client import answer_question, caption_image, rerank_candidates, rewrite_query, send_prompt
 from llm.prompt import prompt_for_qa
 from mention_groups import (
     add_to_group,
@@ -19,6 +20,7 @@ from mention_groups import (
     list_groups,
     remove_from_group,
 )
+from voice_transcription import transcribe
 
 IGNORED_USERNAME = "sglypa_tg_bot"
 
@@ -103,7 +105,7 @@ def format_summary_html(raw_text, legend):
     return '\n'.join(line.rstrip() for line in text.split('\n'))
 
 
-def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18):
+def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18, thread_id=None):
     with get_conn() as conn:
         cursor = conn.cursor()
 
@@ -112,7 +114,7 @@ def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18):
         )
         last_row = cursor.fetchone()
         if last_row is None:
-            bot.send_message(chat_id, "У вас нет сообщений для суммаризации.")
+            bot.send_message(chat_id, "У вас нет сообщений для суммаризации.", message_thread_id=thread_id)
             return
 
         last_summary_id, last_summary_text = get_chat_state(cursor, chat_id)
@@ -127,7 +129,9 @@ def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18):
             N = cursor.fetchone()[0]
 
         if N <= 10:
-            bot.send_message(chat_id, f"Сообщений было написано слишком мало для суммаризации: {N}")
+            bot.send_message(
+                chat_id, f"Сообщений было написано слишком мало для суммаризации: {N}", message_thread_id=thread_id
+            )
             return
 
         cursor.execute(
@@ -143,7 +147,7 @@ def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18):
         rows = cursor.fetchall()[::-1]
 
         if not rows:
-            bot.send_message(chat_id, "Нет сообщений для суммаризации")
+            bot.send_message(chat_id, "Нет сообщений для суммаризации", message_thread_id=thread_id)
             return
 
         legend = {}
@@ -167,14 +171,14 @@ def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18):
         group_context = build_group_context_prompt_section(chat_id)
         res = send_prompt(prompt_body, max_lines=requested_m, group_context=group_context)
         if not res:
-            bot.send_message(chat_id, "LLM решил послать вас с ответом")
+            bot.send_message(chat_id, "LLM решил послать вас с ответом", message_thread_id=thread_id)
             return
 
         save_chat_state(cursor, chat_id, newest_included_id, strip_citations(res))
         conn.commit()
 
     formatted = format_summary_html(res, legend)
-    bot.send_message(chat_id, f'#summary\n\n{formatted}', parse_mode='HTML')
+    bot.send_message(chat_id, f'#summary\n\n{formatted}', parse_mode='HTML', message_thread_id=thread_id)
 
 
 # plainto_tsquery ANDs every word together, which fails as soon as the
@@ -214,6 +218,28 @@ def _rrf_fuse(ranked_lists, k=60):
         for rank, item_id in enumerate(ranked, start=1):
             scores[item_id] += 1.0 / (k + rank)
     return sorted(scores, key=scores.get, reverse=True)
+
+
+def _save_incoming_message(chat_id, user_name, username, text, replied_text, message_id):
+    # Shared by save_messages (typed text) and the voice/photo/sticker
+    # handlers (transcribed/captioned text standing in for the original
+    # media) -- all of them end up as a plain row here either way.
+    try:
+        embedding_literal = to_vector_literal(embed(text))
+        with get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO messages (user_id, user_name, username, message, replied_message, message_id, embedding, search_vector) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, to_tsvector('russian', %s))",
+                (
+                    chat_id, user_name, username,
+                    encrypt(text), encrypt(replied_text), message_id,
+                    embedding_literal, text,
+                ),
+            )
+            conn.commit()
+    except Exception as e:
+        print(f"Ошибка при сохранении сообщения: {e}")
 
 
 def _save_bot_answer(chat_id, sent_message_id, bot_username, plain_text):
@@ -448,42 +474,95 @@ def load_handlers(bot):
     bot_username = bot.get_me().username
     mention_tag = f"@{bot_username}".lower() if bot_username else None
 
+    def _ask_if_mentioned(message, text):
+        # Mentioning the bot anywhere in a regular message is treated as a
+        # question, same as /ask, without needing the explicit command.
+        if mention_tag and mention_tag in text.lower():
+            question = re.sub(re.escape(mention_tag), '', text, flags=re.IGNORECASE).strip()
+            if question:
+                replied_message_id = message.reply_to_message.message_id if message.reply_to_message else None
+                answer_chat_question(bot, message.chat.id, question, replied_message_id, bot_username)
+
     @bot.message_handler(func=lambda mess: mess.text and not mess.text.startswith("/"))
     def save_messages(message):
         if message.from_user.username == IGNORED_USERNAME:
             return
 
-        try:
-            print(f"Получено сообщение: {message.text}")
-            reply_message = message.reply_to_message
-            replied_text = reply_message.text if reply_message else "Отмеченного сообщения нет"
-            user_name = message.from_user.first_name
-            embedding_literal = to_vector_literal(embed(message.text))
-            # search_vector must be computed from the plaintext explicitly
-            # now -- message stores encrypted ciphertext, so Postgres can no
-            # longer derive it automatically the way a GENERATED column did.
-            with get_conn() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "INSERT INTO messages (user_id, user_name, username, message, replied_message, message_id, embedding, search_vector) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, to_tsvector('russian', %s))",
-                    (
-                        message.chat.id, user_name, message.from_user.username,
-                        encrypt(message.text), encrypt(replied_text), message.message_id,
-                        embedding_literal, message.text,
-                    ),
-                )
-                conn.commit()
-        except Exception as e:
-            print(f"Ошибка при сохранении сообщения: {e}")
+        print(f"Получено сообщение: {message.text}")
+        reply_message = message.reply_to_message
+        replied_text = reply_message.text if reply_message else "Отмеченного сообщения нет"
+        _save_incoming_message(
+            message.chat.id, message.from_user.first_name, message.from_user.username,
+            message.text, replied_text, message.message_id,
+        )
+        _ask_if_mentioned(message, message.text)
 
-        # Mentioning the bot anywhere in a regular message is treated as a
-        # question, same as /ask, without needing the explicit command.
-        if mention_tag and mention_tag in message.text.lower():
-            question = re.sub(re.escape(mention_tag), '', message.text, flags=re.IGNORECASE).strip()
-            if question:
-                replied_message_id = message.reply_to_message.message_id if message.reply_to_message else None
-                answer_chat_question(bot, message.chat.id, question, replied_message_id, bot_username)
+    def _download_bytes(file_id):
+        file_info = bot.get_file(file_id)
+        return bot.download_file(file_info.file_path)
+
+    @bot.message_handler(content_types=['voice', 'video_note'])
+    def save_voice_message(message):
+        if message.from_user.username == IGNORED_USERNAME:
+            return
+
+        def run():
+            try:
+                media = message.voice or message.video_note
+                audio_bytes = _download_bytes(media.file_id)
+                text = transcribe(audio_bytes)
+                if not text:
+                    return
+                print(f"Расшифровано голосовое: {text}")
+                reply_message = message.reply_to_message
+                replied_text = reply_message.text if reply_message else "Отмеченного сообщения нет"
+                _save_incoming_message(
+                    message.chat.id, message.from_user.first_name, message.from_user.username,
+                    text, replied_text, message.message_id,
+                )
+                _ask_if_mentioned(message, text)
+            except Exception as e:
+                print(f"Ошибка при обработке голосового/кружка: {e}")
+
+        threading.Thread(target=run, daemon=True).start()
+
+    @bot.message_handler(content_types=['photo', 'sticker'])
+    def save_visual_message(message):
+        if message.from_user.username == IGNORED_USERNAME:
+            return
+
+        def run():
+            try:
+                if message.photo:
+                    file_id = message.photo[-1].file_id
+                    tag = "изображение"
+                else:
+                    # Animated/video stickers (TGS/WEBM) aren't a plain
+                    # decodable image -- their thumbnail is, and every
+                    # sticker has one, static or not, so use it uniformly.
+                    sticker = message.sticker
+                    file_id = sticker.thumbnail.file_id if sticker.thumbnail else sticker.file_id
+                    tag = "стикер"
+
+                image_bytes = _download_bytes(file_id)
+                image_b64 = base64.b64encode(image_bytes).decode('utf-8')
+                caption = caption_image(image_b64)
+                if not caption:
+                    return
+                print(f"Описано {tag}: {caption}")
+                text = f"[{tag}] {caption.strip()}"
+                reply_message = message.reply_to_message
+                replied_text = reply_message.text if reply_message else "Отмеченного сообщения нет"
+                _save_incoming_message(
+                    message.chat.id, message.from_user.first_name, message.from_user.username,
+                    text, replied_text, message.message_id,
+                )
+                if message.caption:
+                    _ask_if_mentioned(message, message.caption)
+            except Exception as e:
+                print(f"Ошибка при обработке {'фото' if message.photo else 'стикера'}: {e}")
+
+        threading.Thread(target=run, daemon=True).start()
 
     @bot.message_handler(commands=['help'])
     def help_command(message):
@@ -601,7 +680,7 @@ def load_handlers(bot):
             requested_m = int(dt[2])
             print(f"Пользователь запросил суммаризацию в размере {requested_m} строк")
 
-        generate_and_send_summary(bot, message.chat.id, requested_n, requested_m)
+        generate_and_send_summary(bot, message.chat.id, requested_n, requested_m, message.message_thread_id)
 
     @bot.message_handler(commands=['ask'])
     def ask_cmd(message):

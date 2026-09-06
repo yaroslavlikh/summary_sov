@@ -9,3 +9,4 @@ flask
 waitress
 scikit-learn
 cryptography
+faster-whisper
