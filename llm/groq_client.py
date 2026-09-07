@@ -96,9 +96,9 @@ def answer_context_question(full_prompt):
 # (not the final answer) -- FALLBACK_MODEL alone (gpt-oss-20b, ~900+ tok/s on
 # Groq) keeps them cheap and fast rather than pulling in PRIMARY_MODEL.
 
-def rewrite_query(question, context_lines):
+def rewrite_query(question, context_lines, asker_name="неизвестный"):
     context = "\n".join(context_lines)
-    full_prompt = prompt_for_query_rewrite.format(context=context, question=question)
+    full_prompt = prompt_for_query_rewrite.format(context=context, question=question, asker_name=asker_name)
     result = _complete(full_prompt, temperature=0.2, models=[FALLBACK_MODEL])
     return result.strip() if result else None
 

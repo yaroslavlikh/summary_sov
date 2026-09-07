@@ -318,7 +318,7 @@ def _save_bot_answer(chat_id, sent_message_id, bot_username, plain_text):
 
 
 @observe(name="ask")
-def answer_chat_question(bot, chat_id, question, replied_message_id=None, bot_username=None):
+def answer_chat_question(bot, chat_id, question, replied_message_id=None, bot_username=None, asker_name="неизвестный"):
     langfuse.update_current_span(input=question)
     with get_conn() as conn:
         cursor = conn.cursor()
@@ -382,7 +382,7 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None, bot_us
                     f"{resolve_display_name(username, user_name)}: {decrypt(text)}"
                     for _, user_name, username, text in ordered_rows
                 ]
-                rewritten = rewrite_query(question, context_lines)
+                rewritten = rewrite_query(question, context_lines, asker_name)
                 if rewritten:
                     effective_question = rewritten
 
@@ -515,7 +515,9 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None, bot_us
             + "\n".join(f"- {m}" for m in relevant_moments) + "\n"
         )
 
-    full_prompt = prompt_for_qa.format(question=question, messages="\n".join(lines), group_context=group_context)
+    full_prompt = prompt_for_qa.format(
+        question=question, messages="\n".join(lines), group_context=group_context, asker_name=asker_name
+    )
     res = answer_question(full_prompt)
     if not res:
         bot.send_message(chat_id, "LLM решил послать вас с ответом")
@@ -539,7 +541,8 @@ def load_handlers(bot):
             question = re.sub(re.escape(mention_tag), '', text, flags=re.IGNORECASE).strip()
             if question:
                 replied_message_id = message.reply_to_message.message_id if message.reply_to_message else None
-                answer_chat_question(bot, message.chat.id, question, replied_message_id, bot_username)
+                asker_name = resolve_display_name(message.from_user.username, message.from_user.first_name)
+                answer_chat_question(bot, message.chat.id, question, replied_message_id, bot_username, asker_name)
 
     @bot.message_handler(func=lambda mess: mess.text and not mess.text.startswith("/"))
     def save_messages(message):
@@ -771,7 +774,8 @@ def load_handlers(bot):
 
         question = dt[1]
         replied_message_id = message.reply_to_message.message_id if message.reply_to_message else None
-        answer_chat_question(bot, message.chat.id, question, replied_message_id, bot_username)
+        asker_name = resolve_display_name(message.from_user.username, message.from_user.first_name)
+        answer_chat_question(bot, message.chat.id, question, replied_message_id, bot_username, asker_name)
 
     @bot.message_handler(commands=['addcontext'])
     def add_context_cmd(message):
