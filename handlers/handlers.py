@@ -2,6 +2,7 @@ import base64
 import html
 import re
 import threading
+import time
 from collections import defaultdict
 
 from chat_context import add_note, get_context_block, list_notes, remove_note
@@ -497,9 +498,21 @@ def load_handlers(bot):
         )
         _ask_if_mentioned(message, message.text)
 
-    def _download_bytes(file_id):
-        file_info = bot.get_file(file_id)
-        return bot.download_file(file_info.file_path)
+    def _download_bytes(file_id, attempts=3):
+        # Transient connect timeouts to api.telegram.org happen occasionally
+        # from cloud hosts -- without a retry, a single blip permanently
+        # loses that voice/photo/sticker instead of just being slow once.
+        last_error = None
+        for attempt in range(attempts):
+            try:
+                file_info = bot.get_file(file_id)
+                return bot.download_file(file_info.file_path)
+            except Exception as e:
+                last_error = e
+                print(f"Попытка {attempt + 1}/{attempts} скачать файл не удалась: {e}")
+                if attempt < attempts - 1:
+                    time.sleep(2)
+        raise last_error
 
     @bot.message_handler(content_types=['voice', 'video_note'])
     def save_voice_message(message):
