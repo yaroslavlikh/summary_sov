@@ -10,3 +10,4 @@ waitress
 scikit-learn
 cryptography
 faster-whisper
+langfuse

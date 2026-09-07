@@ -5,15 +5,26 @@ import threading
 import time
 from collections import defaultdict
 
+from langfuse import get_client, observe
+
 from chat_context import add_note, get_context_block, list_notes, remove_note
-from chat_moments import search_moments
+from chat_moments import add_moment, search_moments
 from context_learning import learn_context
 from crypto_utils import decrypt, encrypt
 from database.db import get_conn
 from display_names import resolve_display_name
 from embeddings import embed, to_vector_literal
-from llm.groq_client import answer_question, caption_image, rerank_candidates, rewrite_query, send_prompt
+from llm.groq_client import (
+    answer_question,
+    caption_image,
+    extract_context_updates,
+    rerank_candidates,
+    rewrite_query,
+    send_prompt,
+)
 from llm.prompt import prompt_for_qa
+
+langfuse = get_client()
 from mention_groups import (
     add_to_group,
     delete_group,
@@ -106,6 +117,7 @@ def format_summary_html(raw_text, legend):
     return '\n'.join(line.rstrip() for line in text.split('\n'))
 
 
+@observe(name="summary")
 def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18, thread_id=None):
     with get_conn() as conn:
         cursor = conn.cursor()
@@ -170,9 +182,11 @@ def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18, th
         newest_included_id = rows[-1][0]
 
         group_context = build_group_context_prompt_section(chat_id)
+        langfuse.update_current_span(input=f"{N} сообщений, chat_id={chat_id}")
         res = send_prompt(prompt_body, max_lines=requested_m, group_context=group_context)
         if not res:
             bot.send_message(chat_id, "LLM решил послать вас с ответом", message_thread_id=thread_id)
+            langfuse.update_current_span(output=None)
             return
 
         save_chat_state(cursor, chat_id, newest_included_id, strip_citations(res))
@@ -180,6 +194,33 @@ def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18, th
 
     formatted = format_summary_html(res, legend)
     bot.send_message(chat_id, f'#summary\n\n{formatted}', parse_mode='HTML', message_thread_id=thread_id)
+    langfuse.update_current_span(output=res)
+
+    _extract_context_from_batch(chat_id, lines)
+
+
+def _extract_context_from_batch(chat_id, lines):
+    # Runs on the same message batch /summary just read, so nothing from it
+    # goes unseen -- a live, incremental complement to /learncontext's
+    # offline batch pass. source='live' keeps these out of /learncontext's
+    # wipe-and-rebuild of its own 'auto' notes.
+    def execute(tool_name, args):
+        if tool_name == "update_portrait":
+            tag = "о себе" if args.get("source") == "self" else "со слов других"
+            note = f"[О {args['person']}, {tag}]: {args['addition']}"
+            add_note(chat_id, note, source='live')
+        elif tool_name == "add_chat_lore":
+            add_note(chat_id, args['note'], source='live')
+        elif tool_name == "record_moment":
+            note = args['note']
+            add_moment(chat_id, note, embed(note))
+        else:
+            raise ValueError(f"Неизвестный тул: {tool_name}")
+
+    try:
+        extract_context_updates("\n".join(lines), execute)
+    except Exception as e:
+        print(f"Ошибка при извлечении контекста из батча саммари: {e}")
 
 
 # plainto_tsquery ANDs every word together, which fails as soon as the
@@ -266,7 +307,9 @@ def _save_bot_answer(chat_id, sent_message_id, bot_username, plain_text):
         print(f"Ошибка при сохранении ответа бота: {e}")
 
 
+@observe(name="ask")
 def answer_chat_question(bot, chat_id, question, replied_message_id=None, bot_username=None):
+    langfuse.update_current_span(input=question)
     with get_conn() as conn:
         cursor = conn.cursor()
 
@@ -383,6 +426,7 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None, bot_us
             candidate_ids = fused_ids[:10]
             if not candidate_ids:
                 bot.send_message(chat_id, "В истории чата не нашёл ничего похожего на этот вопрос.")
+                langfuse.update_current_span(output="не нашёл ничего похожего (нет кандидатов)")
                 return
 
             cursor.execute(
@@ -436,6 +480,7 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None, bot_us
 
     if not rows:
         bot.send_message(chat_id, "В истории чата не нашёл ничего похожего на этот вопрос.")
+        langfuse.update_current_span(output="не нашёл ничего похожего (окно вокруг совпадений пустое)")
         return
 
     legend = {}
@@ -464,11 +509,13 @@ def answer_chat_question(bot, chat_id, question, replied_message_id=None, bot_us
     res = answer_question(full_prompt)
     if not res:
         bot.send_message(chat_id, "LLM решил послать вас с ответом")
+        langfuse.update_current_span(output=None)
         return
 
     formatted = format_summary_html(res, legend)
     sent = bot.send_message(chat_id, formatted, parse_mode='HTML')
     _save_bot_answer(chat_id, sent.message_id, bot_username, strip_citations(res))
+    langfuse.update_current_span(output=res)
 
 
 def load_handlers(bot):

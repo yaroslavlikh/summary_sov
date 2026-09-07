@@ -1,11 +1,23 @@
+import json
 import re
 
 from groq import Groq
+from langfuse import get_client, observe
 
 from config import get_groq_api_key
-from llm.prompt import prompt_for_image_caption, prompt_for_llm, prompt_for_query_rewrite, prompt_for_rerank
+from llm.prompt import (
+    prompt_for_context_extraction,
+    prompt_for_image_caption,
+    prompt_for_llm,
+    prompt_for_query_rewrite,
+    prompt_for_rerank,
+)
 
 API_key = get_groq_api_key()
+# get_client() reads LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY/LANGFUSE_HOST from
+# the environment. If they're unset it silently no-ops instead of erroring, so
+# tracing is opt-in and never breaks local runs without Langfuse configured.
+langfuse = get_client()
 
 PRIMARY_MODEL = "openai/gpt-oss-120b"
 FALLBACK_MODEL = "openai/gpt-oss-20b"
@@ -23,13 +35,27 @@ CONTEXT_LEARNING_MODEL = "qwen/qwen3.8-27b"
 VISION_MODEL = "qwen/qwen3.6-27b"
 
 
+@observe(as_type="generation", name="groq-completion", capture_input=False, capture_output=False)
 def _ask(client, model, full_prompt, temperature):
     response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": full_prompt}],
         temperature=temperature,
     )
-    return response.choices[0].message.content
+    content = response.choices[0].message.content
+    usage = response.usage
+    langfuse.update_current_generation(
+        model=model,
+        input=full_prompt,
+        output=content,
+        model_parameters={"temperature": temperature},
+        usage_details={
+            "input": usage.prompt_tokens,
+            "output": usage.completion_tokens,
+            "total": usage.total_tokens,
+        } if usage else None,
+    )
+    return content
 
 
 def _complete(full_prompt, temperature, models):
@@ -82,6 +108,111 @@ def rerank_candidates(question, numbered_messages):
     return _complete(full_prompt, temperature=0.0, models=[FALLBACK_MODEL])
 
 
+CONTEXT_EXTRACTION_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "update_portrait",
+            "description": (
+                "Добавить факт/черту о конкретном человеке — то, что он сказал "
+                "о себе, или что о нём сказали другие."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "person": {"type": "string", "description": "Имя/ник человека"},
+                    "addition": {"type": "string", "description": "Что добавить, коротко"},
+                    "source": {"type": "string", "enum": ["self", "external"]},
+                },
+                "required": ["person", "addition", "source"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_chat_lore",
+            "description": "Добавить общий факт/шутку/повторяющуюся тему чата, не привязанную к одному человеку.",
+            "parameters": {
+                "type": "object",
+                "properties": {"note": {"type": "string"}},
+                "required": ["note"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "record_moment",
+            "description": "Записать яркий момент/мнение/шутку из переписки.",
+            "parameters": {
+                "type": "object",
+                "properties": {"note": {"type": "string"}},
+                "required": ["note"],
+            },
+        },
+    },
+]
+
+# Fire-and-forget writes, not lookups -- the model never needs real data back,
+# so every tool result is just a flat acknowledgement. Capped iterations
+# guard against a runaway back-and-forth if the model keeps calling tools.
+_MAX_TOOL_ITERATIONS = 6
+
+
+@observe(name="groq-context-extraction")
+def extract_context_updates(messages_text, execute_fn):
+    """Runs a tool-calling loop over messages_text on FALLBACK_MODEL.
+    execute_fn(tool_name, arguments_dict) is called for each tool call the
+    model makes; exceptions from it are fed back to the model as the tool
+    result so it can see the write failed, rather than silently vanishing."""
+    if not API_key:
+        print("Ошибка: GROQ_API_KEY не установлен")
+        return
+
+    client = Groq(api_key=API_key)
+    messages = [{"role": "user", "content": prompt_for_context_extraction.format(messages=messages_text)}]
+
+    for _ in range(_MAX_TOOL_ITERATIONS):
+        try:
+            response = client.chat.completions.create(
+                model=FALLBACK_MODEL,
+                messages=messages,
+                tools=CONTEXT_EXTRACTION_TOOLS,
+                temperature=0.3,
+            )
+        except Exception as e:
+            print(f"Ошибка при извлечении контекста: {e}")
+            return
+
+        choice = response.choices[0].message
+        if not choice.tool_calls:
+            return
+
+        messages.append({
+            "role": "assistant",
+            "content": choice.content,
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                }
+                for tc in choice.tool_calls
+            ],
+        })
+
+        for tool_call in choice.tool_calls:
+            try:
+                args = json.loads(tool_call.function.arguments)
+                execute_fn(tool_call.function.name, args)
+                result = "Записано"
+            except Exception as e:
+                result = f"Ошибка: {e}"
+            messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
+
+
+@observe(as_type="generation", name="groq-image-caption", capture_input=False, capture_output=False)
 def caption_image(image_b64):
     if not API_key:
         print("Ошибка: GROQ_API_KEY не установлен")
@@ -104,7 +235,20 @@ def caption_image(image_b64):
         # This vision model is a reasoning model that prepends its
         # chain-of-thought in a <think> block -- only the text after it is
         # the actual caption.
-        return re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip() if content else None
+        caption = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip() if content else None
+        usage = response.usage
+        langfuse.update_current_generation(
+            model=VISION_MODEL,
+            input=prompt_for_image_caption,
+            output=caption,
+            model_parameters={"temperature": 0.3},
+            usage_details={
+                "input": usage.prompt_tokens,
+                "output": usage.completion_tokens,
+                "total": usage.total_tokens,
+            } if usage else None,
+        )
+        return caption
     except Exception as e:
         print(f"Ошибка при описании изображения: {e}")
         return None
