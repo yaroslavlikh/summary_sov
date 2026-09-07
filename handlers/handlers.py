@@ -204,7 +204,17 @@ def _extract_context_from_batch(chat_id, lines):
     # goes unseen -- a live, incremental complement to /learncontext's
     # offline batch pass. source='live' keeps these out of /learncontext's
     # wipe-and-rebuild of its own 'auto' notes.
+    # The model can repeat an identical call across loop iterations despite
+    # being told not to -- a plain in-memory dedup on (tool, args) for this
+    # one batch is a cheap, reliable backstop regardless of prompt compliance.
+    seen = set()
+
     def execute(tool_name, args):
+        signature = (tool_name, tuple(sorted(args.items())))
+        if signature in seen:
+            return
+        seen.add(signature)
+
         if tool_name == "update_portrait":
             tag = "о себе" if args.get("source") == "self" else "со слов других"
             note = f"[О {args['person']}, {tag}]: {args['addition']}"
