@@ -116,6 +116,7 @@ class AskState(TypedDict, total=False):
     answer_plain: Optional[str]
     handled_as_memory: bool
     memory_reply: Optional[str]
+    write_memory: Optional[Callable[[int, Optional[str], str], None]]
 
 
 def _resolve_anchor(state: AskState) -> AskState:
@@ -147,6 +148,13 @@ def _classify_intent(state: AskState, config: RunnableConfig) -> AskState:
     if intent not in {"self_identity", "deictic", "self_contained", "other_person"}:
         intent = "self_contained"
     return {"intent": intent}
+
+
+def _default_write_memory(chat_id: int, memory_target: Optional[str], memory_note: str) -> None:
+    if memory_target:
+        upsert_portrait(chat_id, memory_target, memory_note)
+    else:
+        add_note(chat_id, memory_note, source="live")
 
 
 def _classify_and_rewrite(state: AskState, config: RunnableConfig) -> AskState:
@@ -197,10 +205,8 @@ def _classify_and_rewrite(state: AskState, config: RunnableConfig) -> AskState:
             pass
 
     if intent == "memory_command" and memory_note:
-        if memory_target:
-            upsert_portrait(state["chat_id"], memory_target, memory_note)
-        else:
-            add_note(state["chat_id"], memory_note, source="live")
+        write_memory = state.get("write_memory") or _default_write_memory
+        write_memory(state["chat_id"], memory_target, memory_note)
         return {"intent": intent, "handled_as_memory": True, "memory_reply": "Записал"}
 
     return {"intent": intent, "effective_question": rewritten or state["question"], "handled_as_memory": False}

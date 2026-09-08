@@ -72,6 +72,11 @@ def ask_task(*, item, **kwargs):
         "bot_username": case["bot_username"],
         "thread_id": None,
         "save_bot_answer": lambda *a, **kw: None,  # no-op: never write eval output back into messages
+        # If a mined case happens to look like "запомни ..." to the classifier,
+        # _classify_and_rewrite would otherwise call upsert_portrait/add_note
+        # directly (it's not gated by save_bot_answer) -- an eval replay must
+        # never mutate production chat_context either.
+        "write_memory": lambda *a, **kw: None,
     }
     started = time.perf_counter()
     final = run_ask_graph_merged(state)
