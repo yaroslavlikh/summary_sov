@@ -24,6 +24,16 @@ def init_db():
         cursor.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS message_thread_id BIGINT;")
         cursor.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_message_id BIGINT;")
         cursor.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS message_date BIGINT;")
+        # Replaces the fixed +-3 message_id window for anchor context: a
+        # message either inherits its reply target's conversation_id, or
+        # continues the chat's last conversation_id if the time gap since
+        # the previous message is small, or starts a new one (its own id).
+        # NULL for rows saved before this column existed or without a known
+        # message_date -- those fall back to the old +-3 windowing.
+        cursor.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS conversation_id BIGINT;")
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS messages_conversation_idx ON messages (user_id, conversation_id);"
+        )
         # The bot's own outgoing /ask answers get saved here too (see
         # answer_chat_question), so a later reply to the bot -- or an
         # implicit follow-up like "это правда?" -- has something to anchor

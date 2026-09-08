@@ -306,8 +306,17 @@ def _generate_answer(state: AskState, config: RunnableConfig) -> AskState:
         # (is_bot=FALSE) OR it's one of the actual matches itself (a reply
         # can legitimately anchor on the bot's own prior answer) -- this
         # closes the self-pollution case where the bot's own EARLIER,
-        # unrelated answer sat in the +-3 neighborhood and got cited as an
-        # independent source about someone.
+        # unrelated answer sat nearby and got cited as an independent
+        # source about someone.
+        #
+        # The window itself is conversation_id equality when the anchor has
+        # one (persisted at insert time via reply-chain inheritance / time-
+        # gap continuation -- see _compute_conversation_id in
+        # handlers/handlers.py), which only pulls in messages that are
+        # actually part of the same exchange instead of whatever happens to
+        # sit within +-3 message_ids of it. Anchors without a
+        # conversation_id (pre-migration rows, or no known message_date)
+        # fall back to that old +-3 window.
         cursor.execute(
             """
             SELECT m.id, m.message_id, m.message_thread_id, m.user_name, m.username, m.message
@@ -316,7 +325,10 @@ def _generate_answer(state: AskState, config: RunnableConfig) -> AskState:
               AND EXISTS (
                 SELECT 1 FROM messages anchor
                 WHERE anchor.user_id = %s AND anchor.id = ANY(%s)
-                  AND m.message_id BETWEEN anchor.message_id - 3 AND anchor.message_id + 3
+                  AND (
+                    (anchor.conversation_id IS NOT NULL AND m.conversation_id = anchor.conversation_id)
+                    OR (anchor.conversation_id IS NULL AND m.message_id BETWEEN anchor.message_id - 3 AND anchor.message_id + 3)
+                  )
             ) ORDER BY m.message_id ASC
             """,
             (state["chat_id"], list(match_ids), state["chat_id"], list(match_ids)),
@@ -355,6 +367,7 @@ def _save_bot_answer(state: AskState) -> AskState:
     state["save_bot_answer"](
         state["chat_id"], sent.message_id, state.get("bot_username"), re.sub(r"\s*\[\d+\]", "", state.get("answer_plain") or ""),
         getattr(sent, "message_thread_id", state.get("thread_id")), getattr(sent, "date", None),
+        state.get("replied_message_id"),
     )
     return {}
 

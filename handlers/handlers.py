@@ -185,6 +185,41 @@ def _generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18, t
     })
 
 
+_CONVERSATION_GAP_SECONDS = 300  # how long a lull can be before a new
+                                  # message starts a fresh conversation
+                                  # instead of continuing the last one
+
+
+def _compute_conversation_id(cursor, chat_id, message_id, reply_to_message_id, message_date):
+    # Persisted alternative to the fixed +-3 message_id window used for
+    # anchor context in llm/graphs.py: a message inherits its reply
+    # target's conversation, else continues the chat's last conversation if
+    # it follows closely enough in time, else starts a new one (its own
+    # message_id). None (unresolved -- no message_date, e.g. pre-migration
+    # rows) means the anchor-window query falls back to the old +-3 logic.
+    if reply_to_message_id:
+        cursor.execute(
+            "SELECT conversation_id, message_id FROM messages WHERE user_id = %s AND message_id = %s",
+            (chat_id, reply_to_message_id),
+        )
+        row = cursor.fetchone()
+        if row:
+            return row[0] if row[0] is not None else row[1]
+
+    if message_date is not None:
+        cursor.execute(
+            "SELECT conversation_id, message_id, message_date FROM messages "
+            "WHERE user_id = %s ORDER BY id DESC LIMIT 1",
+            (chat_id,),
+        )
+        row = cursor.fetchone()
+        if row and row[2] is not None and 0 <= message_date - row[2] < _CONVERSATION_GAP_SECONDS:
+            return row[0] if row[0] is not None else row[1]
+        return message_id
+
+    return None
+
+
 def _update_message_embedding(row_id, text):
     try:
         with get_conn() as conn:
@@ -219,14 +254,15 @@ def _save_incoming_message(
         """
         with get_conn() as conn:
             cursor = conn.cursor()
+            conversation_id = _compute_conversation_id(cursor, chat_id, message_id, reply_to_message_id, message_date)
             cursor.execute(
                 f"""
                 INSERT INTO messages (
                     user_id, user_name, username, message, replied_message,
                     message_id, message_thread_id, reply_to_message_id,
-                    message_date, search_vector
+                    message_date, search_vector, conversation_id
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, to_tsvector('russian', %s))
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, to_tsvector('russian', %s), %s)
                 ON CONFLICT (user_id, message_id) WHERE message_id IS NOT NULL
                 {conflict_action}
                 RETURNING id
@@ -235,6 +271,7 @@ def _save_incoming_message(
                     chat_id, user_name, username,
                     encrypt(text), encrypt(replied_text), message_id,
                     message_thread_id, reply_to_message_id, message_date, text,
+                    conversation_id,
                 ),
             )
             row = cursor.fetchone()
@@ -245,7 +282,10 @@ def _save_incoming_message(
         print(f"Ошибка при сохранении сообщения: {e}")
 
 
-def _save_bot_answer(chat_id, sent_message_id, bot_username, plain_text, message_thread_id=None, message_date=None):
+def _save_bot_answer(
+    chat_id, sent_message_id, bot_username, plain_text,
+    message_thread_id=None, message_date=None, reply_to_message_id=None,
+):
     # Outgoing bot messages never pass through save_messages (that only
     # fires on incoming Telegram updates), so without this a reply to the
     # bot's own answer -- or an implicit follow-up like "это правда?" --
@@ -255,20 +295,23 @@ def _save_bot_answer(chat_id, sent_message_id, bot_username, plain_text, message
     try:
         with get_conn() as conn:
             cursor = conn.cursor()
+            conversation_id = _compute_conversation_id(
+                cursor, chat_id, sent_message_id, reply_to_message_id, message_date
+            )
             cursor.execute(
                 """
                 INSERT INTO messages (
                     user_id, user_name, username, message, replied_message,
-                    message_id, message_thread_id, message_date, search_vector, is_bot
+                    message_id, message_thread_id, message_date, search_vector, is_bot, conversation_id
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, to_tsvector('russian', %s), TRUE)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, to_tsvector('russian', %s), TRUE, %s)
                 ON CONFLICT (user_id, message_id) WHERE message_id IS NOT NULL
                 DO UPDATE SET message = EXCLUDED.message, search_vector = EXCLUDED.search_vector
                 RETURNING id
                 """,
                 (
                     chat_id, "Бот", bot_username, encrypt(plain_text), None, sent_message_id,
-                    message_thread_id, message_date, plain_text,
+                    message_thread_id, message_date, plain_text, conversation_id,
                 ),
             )
             row_id = cursor.fetchone()[0]
