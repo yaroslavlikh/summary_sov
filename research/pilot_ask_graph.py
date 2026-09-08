@@ -37,7 +37,14 @@ _pilot_pred, _pilot_results, _tracker = semantic_pilot(_messages_all)
 print(f"  {len(_messages_all)} messages, pilot ready", file=sys.stderr)
 
 
-def _window_rows(chat_id, message_ids):
+def _window_rows(chat_id, message_ids, anchor_message_ids):
+    # Mirrors llm/graphs.py _generate_answer's is_bot filter exactly: a row
+    # is only allowed in if it's genuinely content, or is one of the actual
+    # anchors itself -- an earlier version of this function had no such
+    # filter, which let bot rows (including the exact self-pollution answer
+    # incident #2 is about) leak into the pilot window too, confounding the
+    # clustering-method comparison with an unrelated content-filter
+    # difference. Fixed after review.
     if not message_ids:
         return []
     with get_conn() as conn:
@@ -46,9 +53,10 @@ def _window_rows(chat_id, message_ids):
             """
             SELECT id, message_id, message_thread_id, user_name, username, message
             FROM messages WHERE user_id = %s AND message_id = ANY(%s)
+              AND (is_bot = FALSE OR message_id = ANY(%s))
             ORDER BY message_id ASC
             """,
-            (chat_id, list(message_ids)),
+            (chat_id, list(message_ids), list(anchor_message_ids)),
         )
         return cur.fetchall()
 
@@ -72,7 +80,7 @@ def _generate_answer_pilot(state, config):
     message_ids = []
     for conv_id in conv_ids:
         message_ids.extend(_tracker._episodes[conv_id].message_ids)
-    rows = _window_rows(state["chat_id"], sorted(set(message_ids)))
+    rows = _window_rows(state["chat_id"], sorted(set(message_ids)), anchor_message_ids)
     if not rows:
         return {"answer": None, "window_rows": []}
 

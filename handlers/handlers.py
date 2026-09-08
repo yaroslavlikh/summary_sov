@@ -151,10 +151,21 @@ def _generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18, t
 
         legend = {}
         lines = []
-        for idx, (_, msg_id, msg_thread_id, user_name, username, text, replied) in enumerate(rows, start=1):
-            legend[idx] = build_message_link(chat_id, msg_id, msg_thread_id)
+        for row_id, msg_id, msg_thread_id, user_name, username, text, replied in rows:
+            # Keyed by the REAL Telegram message_id, not a synthetic local
+            # index -- _format_citations only needs legend/citation numbers
+            # to match, so this works as a citation key exactly like the old
+            # 1..N scheme did, but also lets memory extraction (see
+            # memory_facts.py / prompt_for_context_extraction) cite real,
+            # externally-checkable source_message_ids instead of a number
+            # that's meaningless outside this one summary batch. Rows
+            # without a message_id (rare legacy edge case) get the internal
+            # row id instead, purely so the citation number is never a
+            # broken "[None]" -- they just won't resolve to a legend link.
+            cite_id = msg_id if msg_id is not None else row_id
+            legend[cite_id] = build_message_link(chat_id, msg_id, msg_thread_id)
             author = resolve_display_name(username, user_name)
-            entry = f"[{idx}] {author}: {decrypt(text)}"
+            entry = f"[{cite_id}] {author}: {decrypt(text)}"
             replied_plain = decrypt(replied)
             if replied_plain and replied_plain != "Отмеченного сообщения нет":
                 entry += f" (ответ на: {replied_plain})"

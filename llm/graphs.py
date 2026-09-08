@@ -18,6 +18,8 @@ from crypto_utils import decrypt
 from database.db import get_conn
 from display_names import resolve_display_name
 from embeddings import embed, to_vector_literal
+from memory_facts import get_active_facts, search_facts_by_vector
+from memory_facts import upsert_state as upsert_memory_state
 from llm.groq_client import get_chat_model, tracing_config
 from llm.prompt import (
     prompt_for_classify_and_rewrite,
@@ -548,7 +550,7 @@ def _send_summary_failure(state: SummaryState) -> SummaryState:
     return {}
 
 
-def build_summary_graph(chat_id: int):
+def build_summary_graph(chat_id: int, batch_message_ids: Optional[set[int]] = None):
     @tool
     def update_portrait(person: str, addition: str, source: str) -> str:
         """Записать характерную черту или факт о человеке."""
@@ -568,7 +570,32 @@ def build_summary_graph(chat_id: int):
         add_moment(chat_id, note, embed(note))
         return "Записано"
 
-    tools = [update_portrait, add_chat_lore, record_moment]
+    @tool
+    def upsert_state(
+        subject: str, state_key: str, kind: str, claim: str,
+        retrieval_cues: list[str], source_message_ids: list[int],
+    ) -> str:
+        """Записать/обновить изменяемое состояние человека (локация, работа,
+        доступность, отношения, план) с опорой на конкретные message_id."""
+        # Server-side provenance check beyond memory_facts.upsert_state's own
+        # (source messages exist in this chat_id at all): the cited ids must
+        # also actually be part of THIS summary batch, not just anywhere in
+        # chat history -- an extraction model hallucinating a plausible-
+        # looking but wrong message_id must not silently pass.
+        batch_ids = batch_message_ids or set()
+        valid_ids = [mid for mid in (source_message_ids or []) if mid in batch_ids]
+        if not valid_ids:
+            return "Ошибка: source_message_ids не найдены в текущем batch, факт не записан"
+        try:
+            upsert_memory_state(
+                chat_id, subject, state_key or None, kind or "other", claim,
+                retrieval_cues or [], valid_ids,
+            )
+        except ValueError as e:
+            return f"Ошибка: {e}"
+        return "Записано"
+
+    tools = [update_portrait, add_chat_lore, record_moment, upsert_state]
     model = get_chat_model("fast", 0.3).bind_tools(tools)
 
     def extract_context(state: SummaryState, config: RunnableConfig) -> SummaryState:
@@ -592,4 +619,5 @@ def build_summary_graph(chat_id: int):
 
 
 def run_summary_graph(state: SummaryState) -> SummaryState:
-    return build_summary_graph(state["chat_id"]).invoke(state, config=_config())
+    batch_message_ids = {mid for mid in (state.get("legend") or {}) if isinstance(mid, int)}
+    return build_summary_graph(state["chat_id"], batch_message_ids).invoke(state, config=_config())

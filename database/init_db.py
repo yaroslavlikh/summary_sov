@@ -152,4 +152,40 @@ def init_db():
                 USING hnsw (embedding vector_cosine_ops);
         """)
 
+        # Prospective, provenance-bearing "state" memory (research/PROSPECTIVE_MEMORY_RETRIEVAL.md
+        # Stage 0) -- separate from chat_context/chat_moments on purpose: those
+        # two lose their source message_ids and can't be cited back to raw
+        # evidence. A row here always carries source_message_ids, and updates
+        # are events (old row marked inactive + superseded_by), not overwrites,
+        # so a later contradicting fact doesn't erase the history of what was
+        # true when. retrieval_text = claim + retrieval_cues, embedded together
+        # so prospective indexing (search by anticipated FUTURE questions, not
+        # just the claim's own wording) actually works.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS memory_facts (
+                id BIGSERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                subject_key TEXT,
+                state_key TEXT,
+                kind TEXT NOT NULL,
+                claim TEXT NOT NULL,
+                retrieval_text TEXT NOT NULL,
+                embedding vector(384),
+                importance SMALLINT NOT NULL DEFAULT 1,
+                observed_at TIMESTAMPTZ,
+                expires_at TIMESTAMPTZ,
+                active BOOLEAN NOT NULL DEFAULT TRUE,
+                superseded_by BIGINT REFERENCES memory_facts(id),
+                source_message_ids BIGINT[] NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );""")
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS memory_facts_active_idx ON memory_facts "
+            "(chat_id, subject_key) WHERE active = TRUE;"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS memory_facts_embedding_idx ON memory_facts "
+            "USING hnsw (embedding vector_cosine_ops);"
+        )
+
         conn.commit()

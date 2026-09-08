@@ -46,7 +46,12 @@ COMPARISON_DATASET_NAME = "conversation-window-anchor-comparison"
 RESOLVABLE_SOURCE_ROW_IDS = {46173, 46416, 46434}
 
 
-def _window_rows(chat_id, message_ids):
+def _window_rows(chat_id, message_ids, anchor_message_ids):
+    # Mirrors llm/graphs.py _generate_answer's is_bot filter: a row is only
+    # allowed in if it's genuinely content, or is one of the anchors itself.
+    # Missing this let bot rows leak into the window for BOTH variants,
+    # confounding the clustering-method comparison with an unrelated
+    # content-filter difference -- fixed after review.
     if not message_ids:
         return []
     with get_conn() as conn:
@@ -55,9 +60,10 @@ def _window_rows(chat_id, message_ids):
             """
             SELECT id, message_id, message_thread_id, user_name, username, message
             FROM messages WHERE user_id = %s AND message_id = ANY(%s)
+              AND (is_bot = FALSE OR message_id = ANY(%s))
             ORDER BY message_id ASC
             """,
-            (chat_id, list(message_ids)),
+            (chat_id, list(message_ids), list(anchor_message_ids)),
         )
         return cur.fetchall()
 
@@ -128,7 +134,7 @@ def _make_task(variant):
                 return {"skip": True}
             message_ids = _tracker._episodes[conv_id].message_ids
 
-        rows = _window_rows(CHAT_ID, message_ids)
+        rows = _window_rows(CHAT_ID, message_ids, [anchor_mid])
         anchor_row_id = _anchor_row_id(CHAT_ID, anchor_mid)
         result = _generate_answer_for_window(
             CHAT_ID, case["question"], case["asker_name"], anchor_row_id, rows, _config(),

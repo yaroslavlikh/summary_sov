@@ -31,9 +31,16 @@ def get_chat_model(kind="primary", temperature=0.3):
         "context": CONTEXT_LEARNING_MODEL,
         "vision": VISION_MODEL,
     }
-    model = ChatGroq(model=models[kind], api_key=API_KEY, temperature=temperature, max_retries=2)
+    # These are reasoning models -- Groq's default max_tokens (2048) is
+    # sometimes entirely consumed by the hidden reasoning trace before any
+    # actual content or tool call is emitted (finish_reason="length", empty
+    # content, empty tool_calls, silently dropped by every caller that just
+    # checks `if not result`). Found via /summary extraction going quiet on
+    # a real batch that plainly had extractable content -- 8192 gave enough
+    # headroom for the same call to finish normally (finish_reason="tool_calls").
+    model = ChatGroq(model=models[kind], api_key=API_KEY, temperature=temperature, max_retries=2, max_tokens=8192)
     if kind == "primary":
-        fallback = ChatGroq(model=FAST_MODEL, api_key=API_KEY, temperature=temperature, max_retries=2)
+        fallback = ChatGroq(model=FAST_MODEL, api_key=API_KEY, temperature=temperature, max_retries=2, max_tokens=8192)
         return model.with_fallbacks([fallback])
     return model
 

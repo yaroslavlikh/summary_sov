@@ -17,6 +17,7 @@ import sys
 sys.path.insert(0, "/Users/yaroslavlikh/summary_sov")
 
 import config
+from database.db import get_conn
 from langfuse import get_client
 
 from research.conversation_disentanglement import semantic_pilot
@@ -63,6 +64,25 @@ def _baseline_task(*, item, **kwargs):
     }
 
 
+def _filter_is_bot(chat_id, message_ids, anchor_message_ids):
+    # Mirrors llm/graphs.py _generate_answer's is_bot filter -- a row is
+    # only allowed in if it's genuinely content, or is one of the anchors
+    # itself. Missing this earlier let bot rows leak into the pilot window,
+    # confounding the clustering-method comparison with an unrelated
+    # content-filter difference -- fixed after review.
+    if not message_ids:
+        return []
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT message_id FROM messages WHERE user_id = %s AND message_id = ANY(%s) "
+            "AND (is_bot = FALSE OR message_id = ANY(%s))",
+            (chat_id, list(message_ids), list(anchor_message_ids)),
+        )
+        allowed = {r[0] for r in cur.fetchall()}
+    return [mid for mid in message_ids if mid in allowed]
+
+
 def _pilot_task(*, item, **kwargs):
     case = item.input
     anchor_mid = case.get("replied_message_id")
@@ -72,7 +92,7 @@ def _pilot_task(*, item, **kwargs):
     if conv_id is None:
         return {"skip": True, "reason": "anchor not in loaded corpus (no message_date/embedding)"}
     episode = _tracker._episodes[conv_id]
-    ids = episode.message_ids
+    ids = _filter_is_bot(CHAT_ID, episode.message_ids, [anchor_mid])
     return {
         "variant": "semantic_pilot",
         "window_size": len(ids),

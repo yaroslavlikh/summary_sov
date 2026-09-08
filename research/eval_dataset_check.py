@@ -26,13 +26,18 @@ DATASET_NAME = "ask-pipeline-real-invocations"
 
 def baseline_window(anchor_message_id):
     """Reproduces the REAL production window query from llm/graphs.py
-    _generate_answer (conversation_id equality, or +-3 fallback), read-only."""
+    _generate_answer -- conversation_id equality (or +-3 fallback) AND the
+    is_bot filter (a row is only allowed in if it's genuinely content, or is
+    the anchor itself) -- read-only. An earlier version of this function was
+    missing the is_bot filter entirely, which let bot rows leak into the
+    window that real production excludes; fixed after review."""
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute(
             """
             SELECT m.message_id, m.user_name, m.username, m.message, m.is_bot
             FROM messages m WHERE m.user_id = %s
+              AND (m.is_bot = FALSE OR m.message_id = %s)
               AND EXISTS (
                 SELECT 1 FROM messages anchor
                 WHERE anchor.user_id = %s AND anchor.message_id = %s
@@ -42,7 +47,7 @@ def baseline_window(anchor_message_id):
                   )
             ) ORDER BY m.message_id ASC
             """,
-            (CHAT_ID, CHAT_ID, anchor_message_id),
+            (CHAT_ID, anchor_message_id, CHAT_ID, anchor_message_id),
         )
         rows = cur.fetchall()
     out = []
