@@ -12,7 +12,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 
-from chat_context import add_note, get_context_block
+from chat_context import add_note, get_context_block, upsert_portrait
 from chat_moments import add_moment, search_moments
 from crypto_utils import decrypt
 from database.db import get_conn
@@ -114,6 +114,86 @@ class AskState(TypedDict, total=False):
     window_rows: list[tuple]
     answer: Optional[str]
     answer_plain: Optional[str]
+    handled_as_memory: bool
+
+
+# Cheap, zero-LLM-call pre-filter so an ordinary question never pays for the
+# memory-command tool-calling round trip below -- only messages that plausibly
+# look like a "remember this" / "change this person's description" command
+# get the extra LLM call.
+_MEMORY_TRIGGER_WORDS = (
+    "запомни", "запиши", "заметк", "портрет", "поменяй",
+    "измени", "исправь", "обнови", "на самом деле",
+)
+
+
+def _looks_like_memory_command(question: str) -> bool:
+    lowered = question.lower()
+    return any(word in lowered for word in _MEMORY_TRIGGER_WORDS)
+
+
+def _memory_tools(chat_id: int):
+    @tool
+    def set_portrait(person: str, description: str) -> str:
+        """Полностью задать/обновить описание-портрет конкретного человека
+        (заменяет прежнее описание этого человека целиком новым, объединённым
+        с уже известными фактами о нём)."""
+        upsert_portrait(chat_id, person, description)
+        return "Портрет обновлён"
+
+    @tool
+    def remember_fact(note: str) -> str:
+        """Запомнить общий факт, шутку или заметку о группе, не привязанную
+        к описанию конкретного человека."""
+        add_note(chat_id, note, source="live")
+        return "Записано"
+
+    return [set_portrait, remember_fact]
+
+
+def _maybe_handle_memory(state: AskState, config: RunnableConfig) -> AskState:
+    """Lets people teach the bot facts natively by @mentioning it, e.g.
+    "@bot запомни, что Ivjenin — это Женя" or "@bot поменяй портрет Игоря:
+    он не студент, а работает в IT" -- instead of only ever answering
+    questions FROM chat history, a message that looks like a remember/edit
+    command short-circuits straight to a tool call and a confirmation,
+    skipping search/anchor resolution entirely."""
+    question = state.get("question") or ""
+    if not _looks_like_memory_command(question):
+        return {"handled_as_memory": False}
+
+    tools = _memory_tools(state["chat_id"])
+    portraits = get_context_block(state["chat_id"]) or "(портретов пока нет)"
+    prompt = (
+        f"Сообщение от {state['asker_name']}: {question}\n\n"
+        f"Текущие заметки/портреты о людях в чате:\n{portraits}\n\n"
+        "Если это явная команда что-то ЗАПОМНИТЬ или ИЗМЕНИТЬ в описании "
+        "человека/группы -- вызови подходящий тул: set_portrait для полного "
+        "описания конкретного человека (объедини его прежнее описание выше "
+        "с новым фактом в одно цельное новое описание, а не просто повтори "
+        "новый факт), remember_fact для общей заметки, не про конкретного "
+        "человека. Если это НЕ такая команда, а обычный вопрос про историю "
+        "чата -- не вызывай никакой тул."
+    )
+    response = get_chat_model("fast", 0).bind_tools(tools).invoke(prompt, config=config)
+    tool_calls = getattr(response, "tool_calls", None) or []
+    if not tool_calls:
+        return {"handled_as_memory": False}
+
+    by_name = {t.name: t for t in tools}
+    handled_any = False
+    for call in tool_calls:
+        fn = by_name.get(call["name"])
+        if fn:
+            fn.invoke(call["args"])
+            handled_any = True
+
+    state["bot"].send_message(
+        state["chat_id"],
+        "Записал" if handled_any else "Не понял, что именно запомнить.",
+        message_thread_id=state.get("thread_id"),
+    )
+    return {"handled_as_memory": handled_any}
 
 
 def _resolve_anchor(state: AskState) -> AskState:
@@ -401,6 +481,7 @@ def build_ask_graph_merged():
     """Speed variant A: classify_intent + rewrite_query merged into one
     LLM call (_classify_and_rewrite) instead of two sequential ones."""
     graph = StateGraph(AskState)
+    graph.add_node("maybe_memory", _maybe_handle_memory)
     graph.add_node("resolve_anchor", _resolve_anchor)
     graph.add_node("classify_and_rewrite", _classify_and_rewrite)
     graph.add_node("search_fts", _search_fts)
@@ -409,7 +490,10 @@ def build_ask_graph_merged():
     graph.add_node("rerank", _rerank)
     graph.add_node("generate_answer", _generate_answer)
     graph.add_node("save_bot_answer", _save_bot_answer)
-    graph.add_edge(START, "resolve_anchor")
+    graph.add_edge(START, "maybe_memory")
+    graph.add_conditional_edges(
+        "maybe_memory", lambda s: END if s.get("handled_as_memory") else "resolve_anchor"
+    )
     graph.add_conditional_edges(
         "resolve_anchor", lambda s: "generate_answer" if s.get("anchor_id") else "classify_and_rewrite"
     )

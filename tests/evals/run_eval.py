@@ -15,7 +15,7 @@ sys.path.insert(0, "/Users/yaroslavlikh/summary_sov")
 
 from database.db import get_conn
 from langfuse import get_client
-from llm.graphs import run_ask_graph
+from llm.graphs import run_ask_graph_merged
 from tests.evals.judges import ALL_EVALUATORS
 from tests.evals.mine_cases import mine_cases
 
@@ -74,7 +74,7 @@ def ask_task(*, item, **kwargs):
         "save_bot_answer": lambda *a, **kw: None,  # no-op: never write eval output back into messages
     }
     started = time.perf_counter()
-    final = run_ask_graph(state)
+    final = run_ask_graph_merged(state)
     latency_seconds = round(time.perf_counter() - started, 2)
 
     candidate_message_ids = _internal_ids_to_message_ids(case["chat_id"], final.get("candidate_ids") or [])
@@ -139,11 +139,6 @@ def run(chat_id=-1002335227490, limit=20):
         return
 
     print(f"Датасет '{DATASET_NAME}' синхронизирован, {len(cases)} кейсов замайнено в этот прогон.")
-    print(
-        "ВАЖНО: reply_to_message_id/message_date -- новые колонки, у старых записей NULL, "
-        "даже если сообщение реально было reply'ем -- почти все замайненные кейсы уйдут в "
-        "no-anchor ветку графа независимо от того, был ли в реальности reply."
-    )
 
     dataset = langfuse.get_dataset(DATASET_NAME)
     result = dataset.run_experiment(

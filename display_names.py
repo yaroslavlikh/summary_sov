@@ -4,7 +4,7 @@ DISPLAY_NAMES = {
     "Goshanka200": "Игорь",
     "Ivanushka_Internetional": "Ваня",
     "p34108": "Влад",
-    "presccode80": "Ivjenin",
+    "presccode80": "Ivjenin / Женя",
     "Sahaaai": "Сахаи / Саша Резаков",
     "Super_rumit": "Гордей",
     "tigmen": "tigmen / Саша Тигмен",
