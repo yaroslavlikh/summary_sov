@@ -302,16 +302,24 @@ def _generate_answer(state: AskState, config: RunnableConfig) -> AskState:
         return {"answer": None, "window_rows": []}
     with get_conn() as conn:
         cursor = conn.cursor()
+        # A row is only allowed into the window if it's genuinely content
+        # (is_bot=FALSE) OR it's one of the actual matches itself (a reply
+        # can legitimately anchor on the bot's own prior answer) -- this
+        # closes the self-pollution case where the bot's own EARLIER,
+        # unrelated answer sat in the +-3 neighborhood and got cited as an
+        # independent source about someone.
         cursor.execute(
             """
             SELECT m.id, m.message_id, m.message_thread_id, m.user_name, m.username, m.message
-            FROM messages m WHERE m.user_id = %s AND EXISTS (
+            FROM messages m WHERE m.user_id = %s
+              AND (m.is_bot = FALSE OR m.id = ANY(%s))
+              AND EXISTS (
                 SELECT 1 FROM messages anchor
                 WHERE anchor.user_id = %s AND anchor.id = ANY(%s)
                   AND m.message_id BETWEEN anchor.message_id - 3 AND anchor.message_id + 3
             ) ORDER BY m.message_id ASC
             """,
-            (state["chat_id"], state["chat_id"], list(match_ids)),
+            (state["chat_id"], list(match_ids), state["chat_id"], list(match_ids)),
         )
         rows = cursor.fetchall()
     if not rows:
