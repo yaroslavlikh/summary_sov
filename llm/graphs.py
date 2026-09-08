@@ -115,85 +115,7 @@ class AskState(TypedDict, total=False):
     answer: Optional[str]
     answer_plain: Optional[str]
     handled_as_memory: bool
-
-
-# Cheap, zero-LLM-call pre-filter so an ordinary question never pays for the
-# memory-command tool-calling round trip below -- only messages that plausibly
-# look like a "remember this" / "change this person's description" command
-# get the extra LLM call.
-_MEMORY_TRIGGER_WORDS = (
-    "запомни", "запиши", "заметк", "портрет", "поменяй",
-    "измени", "исправь", "обнови", "на самом деле",
-)
-
-
-def _looks_like_memory_command(question: str) -> bool:
-    lowered = question.lower()
-    return any(word in lowered for word in _MEMORY_TRIGGER_WORDS)
-
-
-def _memory_tools(chat_id: int):
-    @tool
-    def set_portrait(person: str, description: str) -> str:
-        """Полностью задать/обновить описание-портрет конкретного человека
-        (заменяет прежнее описание этого человека целиком новым, объединённым
-        с уже известными фактами о нём)."""
-        upsert_portrait(chat_id, person, description)
-        return "Портрет обновлён"
-
-    @tool
-    def remember_fact(note: str) -> str:
-        """Запомнить общий факт, шутку или заметку о группе, не привязанную
-        к описанию конкретного человека."""
-        add_note(chat_id, note, source="live")
-        return "Записано"
-
-    return [set_portrait, remember_fact]
-
-
-def _maybe_handle_memory(state: AskState, config: RunnableConfig) -> AskState:
-    """Lets people teach the bot facts natively by @mentioning it, e.g.
-    "@bot запомни, что Ivjenin — это Женя" or "@bot поменяй портрет Игоря:
-    он не студент, а работает в IT" -- instead of only ever answering
-    questions FROM chat history, a message that looks like a remember/edit
-    command short-circuits straight to a tool call and a confirmation,
-    skipping search/anchor resolution entirely."""
-    question = state.get("question") or ""
-    if not _looks_like_memory_command(question):
-        return {"handled_as_memory": False}
-
-    tools = _memory_tools(state["chat_id"])
-    portraits = get_context_block(state["chat_id"]) or "(портретов пока нет)"
-    prompt = (
-        f"Сообщение от {state['asker_name']}: {question}\n\n"
-        f"Текущие заметки/портреты о людях в чате:\n{portraits}\n\n"
-        "Если это явная команда что-то ЗАПОМНИТЬ или ИЗМЕНИТЬ в описании "
-        "человека/группы -- вызови подходящий тул: set_portrait для полного "
-        "описания конкретного человека (объедини его прежнее описание выше "
-        "с новым фактом в одно цельное новое описание, а не просто повтори "
-        "новый факт), remember_fact для общей заметки, не про конкретного "
-        "человека. Если это НЕ такая команда, а обычный вопрос про историю "
-        "чата -- не вызывай никакой тул."
-    )
-    response = get_chat_model("fast", 0).bind_tools(tools).invoke(prompt, config=config)
-    tool_calls = getattr(response, "tool_calls", None) or []
-    if not tool_calls:
-        return {"handled_as_memory": False}
-
-    by_name = {t.name: t for t in tools}
-    handled_any = False
-    for call in tool_calls:
-        fn = by_name.get(call["name"])
-        if fn:
-            fn.invoke(call["args"])
-            handled_any = True
-
-    state["bot"].send_message(
-        state["chat_id"],
-        "Записал" if handled_any else "Не понял, что именно запомнить.",
-        message_thread_id=state.get("thread_id"),
-    )
-    return {"handled_as_memory": handled_any}
+    memory_reply: Optional[str]
 
 
 def _resolve_anchor(state: AskState) -> AskState:
@@ -228,9 +150,15 @@ def _classify_intent(state: AskState, config: RunnableConfig) -> AskState:
 
 
 def _classify_and_rewrite(state: AskState, config: RunnableConfig) -> AskState:
-    """Merged classify_intent + rewrite_query into one LLM round-trip
-    (speed experiment) -- same context/rules, just one call instead of two
-    sequential ones."""
+    """Merged classify_intent + rewrite_query + memory-command detection into
+    one LLM round-trip -- an explicit instruction like "запомни, что..." or
+    "обращайся к X только как Y" (not a question at all) is recognized here
+    too, piggybacking on the same call that already runs for every non-anchor
+    message instead of costing a second one. A keyword pre-filter was tried
+    first and dropped -- natural phrasings for this ("обращайся к X как Y",
+    "зови меня Y") don't share a small fixed vocabulary, so keyword-matching
+    missed real cases in production; the model call already happening here is
+    reliable and free."""
     with get_conn() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -254,15 +182,28 @@ def _classify_and_rewrite(state: AskState, config: RunnableConfig) -> AskState:
     raw = _content(get_chat_model("fast", 0).invoke(prompt, config=config)).strip()
     match = re.search(r"\{.*\}", raw, re.DOTALL)
     intent, rewritten = "self_contained", state["question"]
+    memory_target, memory_note = None, None
     if match:
         try:
             parsed = json.loads(match.group(0))
-            if parsed.get("intent") in {"self_identity", "deictic", "self_contained", "other_person"}:
+            if parsed.get("intent") in {
+                "self_identity", "deictic", "self_contained", "other_person", "memory_command",
+            }:
                 intent = parsed["intent"]
             rewritten = (parsed.get("rewritten_question") or state["question"]).strip()
+            memory_target = (parsed.get("memory_target") or "").strip() or None
+            memory_note = (parsed.get("memory_note") or "").strip() or None
         except Exception:
             pass
-    return {"intent": intent, "effective_question": rewritten or state["question"]}
+
+    if intent == "memory_command" and memory_note:
+        if memory_target:
+            upsert_portrait(state["chat_id"], memory_target, memory_note)
+        else:
+            add_note(state["chat_id"], memory_note, source="live")
+        return {"intent": intent, "handled_as_memory": True, "memory_reply": "Записал"}
+
+    return {"intent": intent, "effective_question": rewritten or state["question"], "handled_as_memory": False}
 
 
 def _rewrite_query(state: AskState, config: RunnableConfig) -> AskState:
@@ -294,6 +235,8 @@ def _rewrite_query(state: AskState, config: RunnableConfig) -> AskState:
 
 
 def _search_fts(state: AskState) -> AskState:
+    if state.get("handled_as_memory"):
+        return {"fts_ids": []}
     with get_conn() as conn:
         cursor = conn.cursor()
         query = _or_query(cursor, state["effective_question"])
@@ -311,6 +254,8 @@ def _search_fts(state: AskState) -> AskState:
 
 
 def _search_vector(state: AskState) -> AskState:
+    if state.get("handled_as_memory"):
+        return {"vector_ids": []}
     with get_conn() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -325,6 +270,8 @@ def _search_vector(state: AskState) -> AskState:
 
 
 def _fuse_rrf(state: AskState) -> AskState:
+    if state.get("handled_as_memory"):
+        return {"candidate_ids": []}
     candidate_ids = _rrf([state.get("fts_ids", []), state.get("vector_ids", [])])[:10]
     if not candidate_ids:
         with get_conn() as conn:
@@ -440,6 +387,9 @@ def _generate_answer(state: AskState, config: RunnableConfig) -> AskState:
 
 def _save_bot_answer(state: AskState) -> AskState:
     bot = state["bot"]
+    if state.get("handled_as_memory"):
+        bot.send_message(state["chat_id"], state.get("memory_reply") or "Записал", message_thread_id=state.get("thread_id"))
+        return {}
     if not state.get("answer"):
         bot.send_message(state["chat_id"], "В истории чата не нашёл ответа на этот вопрос.", message_thread_id=state.get("thread_id"))
         return {}
@@ -481,7 +431,6 @@ def build_ask_graph_merged():
     """Speed variant A: classify_intent + rewrite_query merged into one
     LLM call (_classify_and_rewrite) instead of two sequential ones."""
     graph = StateGraph(AskState)
-    graph.add_node("maybe_memory", _maybe_handle_memory)
     graph.add_node("resolve_anchor", _resolve_anchor)
     graph.add_node("classify_and_rewrite", _classify_and_rewrite)
     graph.add_node("search_fts", _search_fts)
@@ -490,10 +439,7 @@ def build_ask_graph_merged():
     graph.add_node("rerank", _rerank)
     graph.add_node("generate_answer", _generate_answer)
     graph.add_node("save_bot_answer", _save_bot_answer)
-    graph.add_edge(START, "maybe_memory")
-    graph.add_conditional_edges(
-        "maybe_memory", lambda s: END if s.get("handled_as_memory") else "resolve_anchor"
-    )
+    graph.add_edge(START, "resolve_anchor")
     graph.add_conditional_edges(
         "resolve_anchor", lambda s: "generate_answer" if s.get("anchor_id") else "classify_and_rewrite"
     )

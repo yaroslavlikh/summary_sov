@@ -49,40 +49,44 @@ def delete_auto_notes(chat_id):
 
 
 def upsert_portrait(chat_id, person, description):
-    # Replaces that person's existing "Портрет: <person> — ..." note
-    # wholesale (matched by decrypted prefix, since `note` is encrypted at
-    # rest and can't be filtered with SQL LIKE) instead of appending --
-    # unlike update_portrait's incremental one-fact-at-a-time appends during
-    # /summary batch extraction, an explicit "запомни"/"измени" command from
-    # a user is meant to set the description, not grow an unbounded list.
+    # Merges a new fact into that person's existing "Портрет: <person> — ..."
+    # note (matched by decrypted prefix, since `note` is encrypted at rest
+    # and can't be filtered with SQL LIKE) instead of either growing an
+    # unbounded list of separate rows (like update_portrait's one-fact-per-row
+    # appends during /summary batch extraction) or blindly replacing the
+    # whole thing -- a blind replace silently drops earlier facts whenever
+    # the caller's `description` is just the new addition on its own, which
+    # is the common case here since the caller (an LLM call elsewhere) isn't
+    # necessarily shown the prior text.
     prefix = f"Портрет: {person} —"
+    # Strip a redundant leading "<person> —"/"<person> -" in case the caller
+    # echoed the person's name into `description` itself.
+    description = re.sub(rf"^{re.escape(person)}\s*[—-]\s*", "", description.strip())
     with get_conn() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT id, note FROM chat_context WHERE chat_id = %s AND source IN ('auto', 'live')",
             (chat_id,),
         )
-        existing_id = next(
-            (note_id for note_id, note in cursor.fetchall() if decrypt(note).startswith(prefix)),
+        existing = next(
+            ((note_id, decrypt(note)) for note_id, note in cursor.fetchall() if decrypt(note).startswith(prefix)),
             None,
         )
-        # The model sometimes echoes the person's name again inside its own
-        # description (having just seen the existing "Портрет: X —" note as
-        # context) -- strip a redundant leading "X —"/"X -" so it doesn't
-        # end up doubled after the prefix this function already adds.
-        description = re.sub(rf"^{re.escape(person)}\s*[—-]\s*", "", description.strip())
-        new_note = f"{prefix} {description}"
-        if existing_id:
+        if existing:
+            existing_id, existing_note = existing
+            prior = existing_note[len(prefix):].strip()
+            new_note = f"{prefix} {prior}; {description}" if prior else f"{prefix} {description}"
             cursor.execute(
                 "UPDATE chat_context SET note = %s WHERE id = %s", (encrypt(new_note), existing_id)
             )
         else:
+            new_note = f"{prefix} {description}"
             cursor.execute(
                 "INSERT INTO chat_context (chat_id, note, source) VALUES (%s, %s, 'live')",
                 (chat_id, encrypt(new_note)),
             )
         conn.commit()
-    return existing_id is not None
+    return existing is not None
 
 
 def get_context_block(chat_id):
