@@ -5,7 +5,7 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import normalize
 
 from chat_context import add_note, delete_auto_notes
-from chat_moments import add_moment, delete_all_moments
+from chat_moments import add_moment
 from crypto_utils import decrypt
 from database.db import get_conn
 from display_names import resolve_display_name

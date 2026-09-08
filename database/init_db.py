@@ -21,6 +21,9 @@ def init_db():
         cursor.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS replied_message TEXT DEFAULT NULL;")
         cursor.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS message_id BIGINT;")
         cursor.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS username TEXT;")
+        cursor.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS message_thread_id BIGINT;")
+        cursor.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_message_id BIGINT;")
+        cursor.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS message_date BIGINT;")
         # The bot's own outgoing /ask answers get saved here too (see
         # answer_chat_question), so a later reply to the bot -- or an
         # implicit follow-up like "это правда?" -- has something to anchor
@@ -28,6 +31,19 @@ def init_db():
         # can exclude them from what they treat as actual chat content.
         cursor.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_bot BOOLEAN NOT NULL DEFAULT FALSE;")
         cursor.execute("ALTER TABLE messages ALTER COLUMN user_id TYPE BIGINT;")
+        cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS messages_chat_message_uidx
+                ON messages (user_id, message_id)
+                WHERE message_id IS NOT NULL;
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS messages_chat_id_idx
+                ON messages (user_id, id);
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS messages_chat_message_idx
+                ON messages (user_id, message_id);
+        """)
 
         # A pre-existing table can also have an `id` column with no
         # auto-increment default (e.g. created as plain INTEGER PRIMARY KEY),
@@ -58,6 +74,12 @@ def init_db():
                 last_summary_msg_id INTEGER NOT NULL DEFAULT 0
             );""")
         cursor.execute("ALTER TABLE chat_state ADD COLUMN IF NOT EXISTS last_summary_text TEXT DEFAULT NULL;")
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS scheduler_runs (
+                run_key TEXT PRIMARY KEY,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );""")
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS mention_groups (

@@ -1,30 +1,16 @@
 import base64
-import html
 import re
-import threading
 import time
-from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
-from langfuse import get_client, observe
-
-from chat_context import add_note, get_context_block, list_notes, remove_note
-from chat_moments import add_moment, search_moments
+from chat_context import add_note, list_notes, remove_note
 from context_learning import learn_context
 from crypto_utils import decrypt, encrypt
 from database.db import get_conn
 from display_names import resolve_display_name
 from embeddings import embed, to_vector_literal
-from llm.groq_client import (
-    answer_question,
-    caption_image,
-    extract_context_updates,
-    rerank_candidates,
-    rewrite_query,
-    send_prompt,
-)
-from llm.prompt import prompt_for_qa
-
-langfuse = get_client()
+from llm.graphs import _format_citations, run_ask_graph_merged, run_summary_graph
+from llm.groq_client import caption_image
 from mention_groups import (
     add_to_group,
     delete_group,
@@ -35,18 +21,9 @@ from mention_groups import (
 from voice_transcription import transcribe
 
 IGNORED_USERNAME = "sglypa_tg_bot"
-
-
-def build_group_context_prompt_section(chat_id):
-    notes = get_context_block(chat_id)
-    if not notes:
-        return ""
-    return (
-        "\nКонтекст о группе (не сами сообщения переписки, а накопленные заметки "
-        "про участников, их характерные черты, повторяющиеся шутки/темы — используй "
-        "только для лучшего понимания тона и отсылок, не пересказывай как содержание):\n"
-        f"{notes}\n"
-    )
+MAX_SUMMARY_MESSAGES = 500
+MAX_SUMMARY_LINES = 25
+_background_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="summary-bot")
 
 
 def get_chat_ids():
@@ -69,7 +46,7 @@ def save_chat_state(cursor, chat_id, last_id, summary_text):
     cursor.execute(
         "INSERT INTO chat_state (chat_id, last_summary_msg_id, last_summary_text) VALUES (%s, %s, %s) "
         "ON CONFLICT (chat_id) DO UPDATE SET "
-        "last_summary_msg_id = EXCLUDED.last_summary_msg_id, "
+        "last_summary_msg_id = GREATEST(chat_state.last_summary_msg_id, EXCLUDED.last_summary_msg_id), "
         "last_summary_text = EXCLUDED.last_summary_text",
         (chat_id, last_id, summary_text),
     )
@@ -79,7 +56,7 @@ def strip_citations(text):
     return re.sub(r'\s*\[\d+\]', '', text)
 
 
-def build_message_link(chat_id, message_id):
+def build_message_link(chat_id, message_id, thread_id=None):
     if not message_id:
         return None
     chat_id_str = str(chat_id)
@@ -89,36 +66,30 @@ def build_message_link(chat_id, message_id):
     if not chat_id_str.startswith('-100'):
         return None
     internal_id = chat_id_str[4:]
+    if thread_id:
+        return f"https://t.me/c/{internal_id}/{thread_id}/{message_id}"
     return f"https://t.me/c/{internal_id}/{message_id}"
 
 
 def format_summary_html(raw_text, legend):
-    escaped = html.escape(raw_text)
-
-    # The model cites messages by their raw index in the input batch (which
-    # can jump around, e.g. [16][19][42]), since most input messages don't
-    # end up cited at all. Renumber whatever actually appears, in order of
-    # first appearance, to a clean 1, 2, 3... sequence for the reader.
-    seen_order = []
-    for match in re.finditer(r'\[(\d+)\]', escaped):
-        n = int(match.group(1))
-        if n in legend and n not in seen_order:
-            seen_order.append(n)
-    remap = {old: new for new, old in enumerate(seen_order, start=1)}
-
-    def replace_citation(match):
-        n = int(match.group(1))
-        url = legend.get(n)
-        if not url:
-            return ''
-        return f'<a href="{url}">[{remap[n]}]</a> '
-
-    text = re.sub(r'\[(\d+)\]', replace_citation, escaped)
-    return '\n'.join(line.rstrip() for line in text.split('\n'))
+    return _format_citations(raw_text, legend)
 
 
-@observe(name="summary")
 def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18, thread_id=None):
+    # One summary per chat at a time, including across multiple app replicas.
+    # A session advisory lock is released explicitly before the pooled
+    # connection is returned.
+    with get_conn() as lock_conn:
+        lock_cursor = lock_conn.cursor()
+        lock_cursor.execute("SELECT pg_advisory_lock(%s)", (chat_id,))
+        try:
+            return _generate_and_send_summary(bot, chat_id, requested_n, requested_m, thread_id)
+        finally:
+            lock_cursor.execute("SELECT pg_advisory_unlock(%s)", (chat_id,))
+
+
+def _generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18, thread_id=None):
+    requested_m = max(1, min(requested_m, MAX_SUMMARY_LINES))
     with get_conn() as conn:
         cursor = conn.cursor()
 
@@ -133,13 +104,13 @@ def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18, th
         last_summary_id, last_summary_text = get_chat_state(cursor, chat_id)
 
         if requested_n is not None:
-            N = requested_n
+            N = min(requested_n, MAX_SUMMARY_MESSAGES)
         else:
             cursor.execute(
                 "SELECT COUNT(*) FROM messages WHERE user_id = %s AND id > %s AND is_bot = FALSE",
                 (chat_id, last_summary_id),
             )
-            N = cursor.fetchone()[0]
+            N = min(cursor.fetchone()[0], MAX_SUMMARY_MESSAGES)
 
         if N <= 10:
             bot.send_message(
@@ -147,17 +118,32 @@ def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18, th
             )
             return
 
-        cursor.execute(
-            """
-            SELECT id, message_id, user_name, username, message, replied_message
-            FROM messages
-            WHERE user_id = %s AND is_bot = FALSE
-            ORDER BY id DESC
-            LIMIT %s
-            """,
-            (chat_id, N),
-        )
-        rows = cursor.fetchall()[::-1]
+        if requested_n is None:
+            # Process a large backlog oldest-first in bounded chunks, so
+            # advancing the cursor never skips older unseen messages.
+            cursor.execute(
+                """
+                SELECT id, message_id, message_thread_id, user_name, username, message, replied_message
+                FROM messages
+                WHERE user_id = %s AND id > %s AND is_bot = FALSE
+                ORDER BY id ASC
+                LIMIT %s
+                """,
+                (chat_id, last_summary_id, N),
+            )
+            rows = cursor.fetchall()
+        else:
+            cursor.execute(
+                """
+                SELECT id, message_id, message_thread_id, user_name, username, message, replied_message
+                FROM messages
+                WHERE user_id = %s AND is_bot = FALSE
+                ORDER BY id DESC
+                LIMIT %s
+                """,
+                (chat_id, N),
+            )
+            rows = cursor.fetchall()[::-1]
 
         if not rows:
             bot.send_message(chat_id, "Нет сообщений для суммаризации", message_thread_id=thread_id)
@@ -165,8 +151,8 @@ def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18, th
 
         legend = {}
         lines = []
-        for idx, (_, msg_id, user_name, username, text, replied) in enumerate(rows, start=1):
-            legend[idx] = build_message_link(chat_id, msg_id)
+        for idx, (_, msg_id, msg_thread_id, user_name, username, text, replied) in enumerate(rows, start=1):
+            legend[idx] = build_message_link(chat_id, msg_id, msg_thread_id)
             author = resolve_display_name(username, user_name)
             entry = f"[{idx}] {author}: {decrypt(text)}"
             replied_plain = decrypt(replied)
@@ -181,120 +167,85 @@ def generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18, th
 
         newest_included_id = rows[-1][0]
 
-        group_context = build_group_context_prompt_section(chat_id)
-        langfuse.update_current_span(input=f"{N} сообщений, chat_id={chat_id}")
-        res = send_prompt(prompt_body, max_lines=requested_m, group_context=group_context)
-        if not res:
-            bot.send_message(chat_id, "LLM решил послать вас с ответом", message_thread_id=thread_id)
-            langfuse.update_current_span(output=None)
-            return
+    def save_state(last_id, summary_text):
+        with get_conn() as state_conn:
+            save_chat_state(state_conn.cursor(), chat_id, last_id, summary_text)
+            state_conn.commit()
 
-        save_chat_state(cursor, chat_id, newest_included_id, strip_citations(res))
-        conn.commit()
+    run_summary_graph({
+        "chat_id": chat_id,
+        "thread_id": thread_id,
+        "bot": bot,
+        "prompt_body": prompt_body,
+        "lines": lines,
+        "legend": legend,
+        "max_lines": requested_m,
+        "newest_included_id": newest_included_id,
+        "save_summary_state": save_state,
+    })
 
-    formatted = format_summary_html(res, legend)
-    bot.send_message(chat_id, f'#summary\n\n{formatted}', parse_mode='HTML', message_thread_id=thread_id)
-    langfuse.update_current_span(output=res)
 
-    _extract_context_from_batch(chat_id, lines)
-
-
-def _extract_context_from_batch(chat_id, lines):
-    # Runs on the same message batch /summary just read, so nothing from it
-    # goes unseen -- a live, incremental complement to /learncontext's
-    # offline batch pass. source='live' keeps these out of /learncontext's
-    # wipe-and-rebuild of its own 'auto' notes.
-    # The model can repeat an identical call across loop iterations despite
-    # being told not to -- a plain in-memory dedup on (tool, args) for this
-    # one batch is a cheap, reliable backstop regardless of prompt compliance.
-    seen = set()
-
-    def execute(tool_name, args):
-        signature = (tool_name, tuple(sorted(args.items())))
-        if signature in seen:
-            return
-        seen.add(signature)
-
-        if tool_name == "update_portrait":
-            tag = "о себе" if args.get("source") == "self" else "со слов других"
-            note = f"[О {args['person']}, {tag}]: {args['addition']}"
-            add_note(chat_id, note, source='live')
-        elif tool_name == "add_chat_lore":
-            add_note(chat_id, args['note'], source='live')
-        elif tool_name == "record_moment":
-            note = args['note']
-            add_moment(chat_id, note, embed(note))
-        else:
-            raise ValueError(f"Неизвестный тул: {tool_name}")
-
+def _update_message_embedding(row_id, text):
     try:
-        extract_context_updates("\n".join(lines), execute)
+        with get_conn() as conn:
+            conn.cursor().execute(
+                "UPDATE messages SET embedding = %s::vector WHERE id = %s",
+                (to_vector_literal(embed(text)), row_id),
+            )
+            conn.commit()
     except Exception as e:
-        print(f"Ошибка при извлечении контекста из батча саммари: {e}")
+        print(f"Ошибка при построении embedding для сообщения {row_id}: {e}")
 
 
-# plainto_tsquery ANDs every word together, which fails as soon as the
-# question includes meta-words ("менялся", "разговор") that describe the
-# question itself rather than vocabulary the chat actually used. Build an
-# OR-query instead so a message matching any one concept word can surface.
-LATIN_CYRILLIC_JARGON = {
-    "rag": "раг",
-    "раг": "rag",
-    "sql": "скл",
-}
-
-
-def _build_or_query(cursor, question):
-    cursor.execute("SELECT plainto_tsquery('russian', %s)::text", (question,))
-    row = cursor.fetchone()
-    tsquery_text = row[0] if row else None
-    if not tsquery_text:
-        return None
-
-    lexemes = set(re.findall(r"'([^']+)'", tsquery_text))
-    for lex in list(lexemes):
-        alias = LATIN_CYRILLIC_JARGON.get(lex.lower())
-        if alias:
-            lexemes.add(alias)
-
-    return " | ".join(f"'{lex}'" for lex in lexemes) or None
-
-
-def _rrf_fuse(ranked_lists, k=60):
-    """Reciprocal Rank Fusion: combine several ranked id lists into one
-    score per id (1/(k+rank), summed across lists) instead of a flat set
-    union, so ids ranked well by multiple sources (or very well by one)
-    surface above single weak matches. Returns ids sorted best-first."""
-    scores = defaultdict(float)
-    for ranked in ranked_lists:
-        for rank, item_id in enumerate(ranked, start=1):
-            scores[item_id] += 1.0 / (k + rank)
-    return sorted(scores, key=scores.get, reverse=True)
-
-
-def _save_incoming_message(chat_id, user_name, username, text, replied_text, message_id):
+def _save_incoming_message(
+    chat_id, user_name, username, text, replied_text, message_id,
+    message_thread_id=None, reply_to_message_id=None, message_date=None,
+    enqueue_embedding=True,
+):
     # Shared by save_messages (typed text) and the voice/photo/sticker
     # handlers (transcribed/captioned text standing in for the original
     # media) -- all of them end up as a plain row here either way.
     try:
-        embedding_literal = to_vector_literal(embed(text))
+        conflict_action = "DO NOTHING" if not enqueue_embedding else """
+            DO UPDATE SET
+                user_name = EXCLUDED.user_name,
+                username = EXCLUDED.username,
+                message = EXCLUDED.message,
+                replied_message = EXCLUDED.replied_message,
+                message_thread_id = EXCLUDED.message_thread_id,
+                reply_to_message_id = EXCLUDED.reply_to_message_id,
+                message_date = EXCLUDED.message_date,
+                search_vector = EXCLUDED.search_vector
+        """
         with get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO messages (user_id, user_name, username, message, replied_message, message_id, embedding, search_vector) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, to_tsvector('russian', %s))",
+                f"""
+                INSERT INTO messages (
+                    user_id, user_name, username, message, replied_message,
+                    message_id, message_thread_id, reply_to_message_id,
+                    message_date, search_vector
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, to_tsvector('russian', %s))
+                ON CONFLICT (user_id, message_id) WHERE message_id IS NOT NULL
+                {conflict_action}
+                RETURNING id
+                """,
                 (
                     chat_id, user_name, username,
                     encrypt(text), encrypt(replied_text), message_id,
-                    embedding_literal, text,
+                    message_thread_id, reply_to_message_id, message_date, text,
                 ),
             )
+            row = cursor.fetchone()
             conn.commit()
+        if enqueue_embedding and row:
+            _background_pool.submit(_update_message_embedding, row[0], text)
     except Exception as e:
         print(f"Ошибка при сохранении сообщения: {e}")
 
 
-def _save_bot_answer(chat_id, sent_message_id, bot_username, plain_text):
+def _save_bot_answer(chat_id, sent_message_id, bot_username, plain_text, message_thread_id=None, message_date=None):
     # Outgoing bot messages never pass through save_messages (that only
     # fires on incoming Telegram updates), so without this a reply to the
     # bot's own answer -- or an implicit follow-up like "это правда?" --
@@ -305,229 +256,42 @@ def _save_bot_answer(chat_id, sent_message_id, bot_username, plain_text):
         with get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO messages (user_id, user_name, username, message, replied_message, message_id, embedding, search_vector, is_bot) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, to_tsvector('russian', %s), TRUE)",
+                """
+                INSERT INTO messages (
+                    user_id, user_name, username, message, replied_message,
+                    message_id, message_thread_id, message_date, search_vector, is_bot
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, to_tsvector('russian', %s), TRUE)
+                ON CONFLICT (user_id, message_id) WHERE message_id IS NOT NULL
+                DO UPDATE SET message = EXCLUDED.message, search_vector = EXCLUDED.search_vector
+                RETURNING id
+                """,
                 (
                     chat_id, "Бот", bot_username, encrypt(plain_text), None, sent_message_id,
-                    to_vector_literal(embed(plain_text)), plain_text,
+                    message_thread_id, message_date, plain_text,
                 ),
             )
+            row_id = cursor.fetchone()[0]
             conn.commit()
+        _background_pool.submit(_update_message_embedding, row_id, plain_text)
     except Exception as e:
         print(f"Ошибка при сохранении ответа бота: {e}")
 
 
-@observe(name="ask")
-def answer_chat_question(bot, chat_id, question, replied_message_id=None, bot_username=None, asker_name="неизвестный"):
-    langfuse.update_current_span(input=question)
-    with get_conn() as conn:
-        cursor = conn.cursor()
-
-        # A short/deictic question ("это правда?", "серьёзно?") carries no
-        # useful search keywords on its own — it refers to whatever was just
-        # replied to. Anchor on that directly instead of relying on search
-        # to guess, and remember it so we can flag it for the model below.
-        anchor_id = None
-        if replied_message_id:
-            cursor.execute(
-                "SELECT id FROM messages WHERE user_id = %s AND message_id = %s",
-                (chat_id, replied_message_id),
-            )
-            row = cursor.fetchone()
-            if row:
-                anchor_id = row[0]
-
-        effective_question = question
-
-        if anchor_id:
-            # A reply is a strong, deterministic signal -- searching on top
-            # of it, especially for a deictic question like "это правда?"
-            # that carries no real vocabulary of its own, only risks mixing
-            # the anchor with unrelated keyword matches (literal "правда")
-            # and confusing citation numbering between them. This was a
-            # real bug: the anchor was found correctly but still got
-            # outranked/misattributed once weak FTS matches sat alongside
-            # it as candidates. Trust the anchor exclusively; the +-3 window
-            # below still gives the model surrounding context around it.
-            match_ids = {anchor_id}
-        else:
-            # No explicit anchor -- a deictic question still refers to
-            # something, just implicitly. Tested empirically against three
-            # shapes of real usage (immediate follow-up, a murky
-            # clarification thread ~15 messages deep, 40 messages of
-            # unrelated noise): a local window alone is too thin for
-            # anything but an immediate follow-up, and a large raw window
-            # still has a breaking point tied to how chatty the group is.
-            # Combining the local window with the bot's own last few
-            # answers specifically (tracked by their own recency, not the
-            # raw message count) is what actually held across all three.
-            cursor.execute(
-                "SELECT id, user_name, username, message FROM messages WHERE user_id = %s ORDER BY id DESC LIMIT 25",
-                (chat_id,),
-            )
-            recent_rows = cursor.fetchall()
-
-            cursor.execute(
-                "SELECT id, user_name, username, message FROM messages WHERE user_id = %s AND is_bot = TRUE ORDER BY id DESC LIMIT 5",
-                (chat_id,),
-            )
-            bot_rows = cursor.fetchall()
-
-            combined = {row[0]: row for row in recent_rows}
-            combined.update({row[0]: row for row in bot_rows})
-            ordered_rows = [combined[k] for k in sorted(combined)]
-
-            if ordered_rows:
-                context_lines = [
-                    f"{resolve_display_name(username, user_name)}: {decrypt(text)}"
-                    for _, user_name, username, text in ordered_rows
-                ]
-                rewritten = rewrite_query(question, context_lines, asker_name)
-                if rewritten:
-                    effective_question = rewritten
-
-            # Full-text: ranked list, best match first. Matches each
-            # message's own precomputed search_vector (message is stored
-            # encrypted, so tsvector can no longer be derived live from it
-            # the way a window concatenation once did -- only the
-            # precomputed per-message search_vector, built from plaintext
-            # at insert time, is available).
-            or_query = _build_or_query(cursor, effective_question)
-            fts_ids = []
-            if or_query:
-                cursor.execute(
-                    """
-                    SELECT id FROM messages
-                    WHERE user_id = %s AND search_vector @@ to_tsquery('russian', %s)
-                    ORDER BY ts_rank(search_vector, to_tsquery('russian', %s)) DESC
-                    LIMIT 8
-                    """,
-                    (chat_id, or_query, or_query),
-                )
-                fts_ids = [row[0] for row in cursor.fetchall()]
-
-            # Semantic: ranked list, closest first. Catches paraphrased
-            # questions that share no vocabulary with the messages that
-            # actually answer them.
-            question_embedding = embed(effective_question)
-            cursor.execute(
-                """
-                SELECT id FROM messages
-                WHERE user_id = %s AND embedding IS NOT NULL
-                ORDER BY embedding <=> %s::vector
-                LIMIT 8
-                """,
-                (chat_id, to_vector_literal(question_embedding)),
-            )
-            vector_ids = [row[0] for row in cursor.fetchall()]
-
-            fused_ids = _rrf_fuse([fts_ids, vector_ids])
-
-            # Only fall back to "recent messages" when neither search
-            # signal found anything at all -- otherwise it just floods the
-            # context with noise that can outweigh what search actually found.
-            if not fused_ids:
-                cursor.execute(
-                    "SELECT id FROM messages WHERE user_id = %s ORDER BY id DESC LIMIT 10",
-                    (chat_id,),
-                )
-                fused_ids = [row[0] for row in cursor.fetchall()]
-
-            candidate_ids = fused_ids[:10]
-            if not candidate_ids:
-                bot.send_message(chat_id, "В истории чата не нашёл ничего похожего на этот вопрос.")
-                langfuse.update_current_span(output="не нашёл ничего похожего (нет кандидатов)")
-                return
-
-            cursor.execute(
-                """
-                SELECT id, message_id, user_name, username, message
-                FROM messages
-                WHERE user_id = %s AND id = ANY(%s)
-                ORDER BY id ASC
-                """,
-                (chat_id, candidate_ids),
-            )
-            candidate_rows = cursor.fetchall()
-
-            # Rerank: one fast-model pass over the candidate pool picking
-            # only the messages that actually help answer the question (not
-            # just share vocabulary), instead of window-expanding every RRF
-            # match and risking the context-flooding that broke citations
-            # before. Fails open to the unfiltered candidates if the model
-            # returns nothing parseable -- the final QA prompt has its own
-            # "couldn't find it" fallback, so it's safe to let it make that
-            # call instead.
-            match_ids = {row[0] for row in candidate_rows}
-            if len(candidate_rows) > 1:
-                numbered = "\n".join(
-                    f"[{row_id}] {resolve_display_name(username, user_name)}: {decrypt(text)}"
-                    for row_id, _, user_name, username, text in candidate_rows
-                )
-                reranked = rerank_candidates(effective_question, numbered)
-                valid_ids = match_ids
-                reranked_ids = [i for i in (int(n) for n in re.findall(r'\d+', reranked or "")) if i in valid_ids][:5]
-                if reranked_ids:
-                    match_ids = set(reranked_ids)
-
-        # Expand +-3 window for display, so the model sees the actual
-        # per-message text (with correct citation numbers), not just the
-        # bare matches.
-        window_ids = set()
-        for match_id in match_ids:
-            window_ids.update(range(match_id - 3, match_id + 4))
-
-        cursor.execute(
-            """
-            SELECT id, message_id, user_name, username, message
-            FROM messages
-            WHERE user_id = %s AND id = ANY(%s)
-            ORDER BY id ASC
-            """,
-            (chat_id, list(window_ids)),
-        )
-        rows = cursor.fetchall()
-
-    if not rows:
-        bot.send_message(chat_id, "В истории чата не нашёл ничего похожего на этот вопрос.")
-        langfuse.update_current_span(output="не нашёл ничего похожего (окно вокруг совпадений пустое)")
-        return
-
-    legend = {}
-    lines = []
-    for idx, (row_id, msg_id, user_name, username, text) in enumerate(rows, start=1):
-        legend[idx] = build_message_link(chat_id, msg_id)
-        author = resolve_display_name(username, user_name)
-        tag = " [СООБЩЕНИЕ, НА КОТОРОЕ ОТВЕЧАЛИ]" if row_id == anchor_id else ""
-        lines.append(f"[{idx}] {author}: {decrypt(text)}{tag}")
-
-    group_context = build_group_context_prompt_section(chat_id)
-    # Moments search always runs off the ORIGINAL question's embedding, not
-    # effective_question -- when there's an anchor, effective_question was
-    # never rewritten (search was skipped entirely in favor of the anchor),
-    # and moments retrieval still benefits from whatever semantic signal
-    # the raw question carries.
-    relevant_moments = search_moments(chat_id, embed(question), top_k=5)
-    if relevant_moments:
-        group_context += (
-            "\nВозможно релевантные моменты из истории (мнения/настроения/шутки, "
-            "не обязательно точный источник ответа, просто дополнительный фон):\n"
-            + "\n".join(f"- {m}" for m in relevant_moments) + "\n"
-        )
-
-    full_prompt = prompt_for_qa.format(
-        question=question, messages="\n".join(lines), group_context=group_context, asker_name=asker_name
-    )
-    res = answer_question(full_prompt)
-    if not res:
-        bot.send_message(chat_id, "LLM решил послать вас с ответом")
-        langfuse.update_current_span(output=None)
-        return
-
-    formatted = format_summary_html(res, legend)
-    sent = bot.send_message(chat_id, formatted, parse_mode='HTML')
-    _save_bot_answer(chat_id, sent.message_id, bot_username, strip_citations(res))
-    langfuse.update_current_span(output=res)
+def answer_chat_question(
+    bot, chat_id, question, replied_message_id=None, bot_username=None,
+    asker_name="неизвестный", thread_id=None,
+):
+    run_ask_graph_merged({
+        "bot": bot,
+        "chat_id": chat_id,
+        "question": question,
+        "asker_name": asker_name,
+        "replied_message_id": replied_message_id,
+        "bot_username": bot_username,
+        "thread_id": thread_id,
+        "save_bot_answer": _save_bot_answer,
+    })
 
 
 def load_handlers(bot):
@@ -542,19 +306,25 @@ def load_handlers(bot):
             if question:
                 replied_message_id = message.reply_to_message.message_id if message.reply_to_message else None
                 asker_name = resolve_display_name(message.from_user.username, message.from_user.first_name)
-                answer_chat_question(bot, message.chat.id, question, replied_message_id, bot_username, asker_name)
+                answer_chat_question(
+                    bot, message.chat.id, question, replied_message_id, bot_username,
+                    asker_name, getattr(message, 'message_thread_id', None),
+                )
 
     @bot.message_handler(func=lambda mess: mess.text and not mess.text.startswith("/"))
     def save_messages(message):
         if message.from_user.username == IGNORED_USERNAME:
             return
 
-        print(f"Получено сообщение: {message.text}")
+        print(f"Получено сообщение {message.message_id}")
         reply_message = message.reply_to_message
         replied_text = reply_message.text if reply_message else "Отмеченного сообщения нет"
         _save_incoming_message(
             message.chat.id, message.from_user.first_name, message.from_user.username,
             message.text, replied_text, message.message_id,
+            getattr(message, 'message_thread_id', None),
+            reply_message.message_id if reply_message else None,
+            message.date,
         )
         _ask_if_mentioned(message, message.text)
 
@@ -579,6 +349,18 @@ def load_handlers(bot):
         if message.from_user.username == IGNORED_USERNAME:
             return
 
+        reply_message = message.reply_to_message
+        replied_text = reply_message.text if reply_message else "Отмеченного сообщения нет"
+        media_label = "кружок" if message.video_note else "голосовое"
+        placeholder = message.caption or f"[{media_label}]"
+        _save_incoming_message(
+            message.chat.id, message.from_user.first_name, message.from_user.username,
+            placeholder, replied_text, message.message_id,
+            getattr(message, 'message_thread_id', None),
+            reply_message.message_id if reply_message else None,
+            message.date, enqueue_embedding=False,
+        )
+
         def run():
             try:
                 media = message.voice or message.video_note
@@ -586,26 +368,39 @@ def load_handlers(bot):
                 transcript = transcribe(audio_bytes)
                 if not transcript:
                     return
-                print(f"Расшифровано голосовое: {transcript}")
+                print(f"Расшифровано голосовое {message.message_id}")
                 # Voice messages (not video notes) can carry their own typed
                 # caption alongside the audio -- keep it, same as photos.
                 text = f"{message.caption}\n{transcript}" if message.caption else transcript
-                reply_message = message.reply_to_message
-                replied_text = reply_message.text if reply_message else "Отмеченного сообщения нет"
                 _save_incoming_message(
                     message.chat.id, message.from_user.first_name, message.from_user.username,
                     text, replied_text, message.message_id,
+                    getattr(message, 'message_thread_id', None),
+                    reply_message.message_id if reply_message else None,
+                    message.date,
                 )
                 _ask_if_mentioned(message, text)
             except Exception as e:
                 print(f"Ошибка при обработке голосового/кружка: {e}")
 
-        threading.Thread(target=run, daemon=True).start()
+        _background_pool.submit(run)
 
     @bot.message_handler(content_types=['photo', 'sticker'])
     def save_visual_message(message):
         if message.from_user.username == IGNORED_USERNAME:
             return
+
+        reply_message = message.reply_to_message
+        replied_text = reply_message.text if reply_message else "Отмеченного сообщения нет"
+        tag = "изображение" if message.photo else "стикер"
+        placeholder = f"{message.caption}\n[{tag}]" if message.caption else f"[{tag}]"
+        _save_incoming_message(
+            message.chat.id, message.from_user.first_name, message.from_user.username,
+            placeholder, replied_text, message.message_id,
+            getattr(message, 'message_thread_id', None),
+            reply_message.message_id if reply_message else None,
+            message.date, enqueue_embedding=False,
+        )
 
         def run():
             try:
@@ -625,7 +420,7 @@ def load_handlers(bot):
                 image_description = caption_image(image_b64)
                 if not image_description:
                     return
-                print(f"Описано {tag}: {image_description}")
+                print(f"Описано {tag} в сообщении {message.message_id}")
                 # message.caption is the human's own typed text alongside
                 # the photo/sticker (Telegram keeps it separate from
                 # message.text) -- without it, whatever they actually said
@@ -634,18 +429,19 @@ def load_handlers(bot):
                 text = f"[{tag}: {image_description.strip()}]"
                 if message.caption:
                     text = f"{message.caption}\n{text}"
-                reply_message = message.reply_to_message
-                replied_text = reply_message.text if reply_message else "Отмеченного сообщения нет"
                 _save_incoming_message(
                     message.chat.id, message.from_user.first_name, message.from_user.username,
                     text, replied_text, message.message_id,
+                    getattr(message, 'message_thread_id', None),
+                    reply_message.message_id if reply_message else None,
+                    message.date,
                 )
                 if message.caption:
                     _ask_if_mentioned(message, message.caption)
             except Exception as e:
                 print(f"Ошибка при обработке {'фото' if message.photo else 'стикера'}: {e}")
 
-        threading.Thread(target=run, daemon=True).start()
+        _background_pool.submit(run)
 
     @bot.message_handler(commands=['help'])
     def help_command(message):
@@ -775,7 +571,10 @@ def load_handlers(bot):
         question = dt[1]
         replied_message_id = message.reply_to_message.message_id if message.reply_to_message else None
         asker_name = resolve_display_name(message.from_user.username, message.from_user.first_name)
-        answer_chat_question(bot, message.chat.id, question, replied_message_id, bot_username, asker_name)
+        answer_chat_question(
+            bot, message.chat.id, question, replied_message_id, bot_username,
+            asker_name, getattr(message, 'message_thread_id', None),
+        )
 
     @bot.message_handler(commands=['addcontext'])
     def add_context_cmd(message):
@@ -828,4 +627,4 @@ def load_handlers(bot):
                 print(f"Ошибка при сборе контекста: {e}")
                 bot.send_message(chat_id, "Что-то пошло не так при сборе контекста, гляну логи.")
 
-        threading.Thread(target=run, daemon=True).start()
+        _background_pool.submit(run)

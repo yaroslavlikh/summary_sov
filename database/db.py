@@ -1,6 +1,5 @@
 from contextlib import contextmanager
 
-import psycopg2
 from psycopg2 import pool as pg_pool
 
 from config import get_database_url

@@ -19,7 +19,7 @@ Telegram-бот для автоматического сохранения и с
 
 ### Требования
 
-- Python 3.9 или выше
+- Python 3.10 или выше
 - Telegram Bot Token
 - Groq API Key
 - Postgres база данных (например, Railway)
@@ -37,6 +37,8 @@ BOT_TOKEN=ваш_токен_telegram_бота
 GROQ_API_KEY=ваш_ключ_groq_api
 TIMEZONE=Europe/Kyiv
 DATABASE_URL=postgresql://user:password@host:port/dbname
+MESSAGE_ENCRYPTION_KEY=ключ Fernet
+RAILWAY_PUBLIC_DOMAIN=your-service.up.railway.app
 ```
 
 3. Получите необходимые токены:
@@ -82,7 +84,8 @@ summary_sov/
 ├── handlers/
 │   └── handlers.py      # Обработчики сообщений и команд, генерация саммари
 ├── llm/
-│   ├── groq_client.py    # Интеграция с Groq (gpt-oss)
+│   ├── groq_client.py    # ChatGroq-клиент и модели
+│   ├── graphs.py         # LangGraph-пайплайны /ask и /summary
 │   └── prompt.py         # Шаблон промпта для LLM
 ├── database/
 │   ├── db.py             # Пул соединений с Postgres
@@ -93,7 +96,7 @@ summary_sov/
 
 ## База данных
 
-Postgres, две таблицы:
+Postgres. Основные таблицы создаются и обновляются автоматически:
 
 ```sql
 CREATE TABLE messages (
@@ -103,7 +106,13 @@ CREATE TABLE messages (
     message TEXT NOT NULL,
     last_id INTEGER DEFAULT 0,     -- легаси-колонка, не используется
     replied_message TEXT DEFAULT NULL,
-    message_id BIGINT              -- Telegram message_id, для ссылок в саммари
+    message_id BIGINT,             -- Telegram message_id, для ссылок в саммари
+    message_thread_id BIGINT,      -- тема форума Telegram
+    reply_to_message_id BIGINT,
+    message_date BIGINT,
+    is_bot BOOLEAN NOT NULL DEFAULT FALSE,
+    search_vector TSVECTOR,
+    embedding VECTOR(384)
 );
 
 CREATE TABLE chat_state (
@@ -111,6 +120,10 @@ CREATE TABLE chat_state (
     last_summary_msg_id INTEGER NOT NULL DEFAULT 0
 );
 ```
+
+Дополнительно используются `mention_groups`, `chat_context`, `chat_moments`
+и `scheduler_runs`. Пара `(user_id, message_id)` уникальна, поэтому повторная
+доставка Telegram webhook не создаёт дубликаты.
 
 Схема создаётся и самопочиняется автоматически при старте (`init_db()`), в том числе если таблица уже существовала в устаревшем виде.
 
@@ -122,6 +135,14 @@ CREATE TABLE chat_state (
 - `GROQ_API_KEY` — ключ API Groq
 - `DATABASE_URL` — строка подключения к Postgres
 - `TIMEZONE` — таймзона для расписания авто-саммари (по умолчанию `Europe/Kyiv`)
+- `MESSAGE_ENCRYPTION_KEY` — ключ Fernet для шифрования сообщений и заметок
+- `RAILWAY_PUBLIC_DOMAIN` — публичный домен webhook без `https://`
+
+## Проверка
+
+```bash
+python -m unittest discover -s tests -v
+```
 
 ## Модели LLM
 
@@ -129,6 +150,10 @@ CREATE TABLE chat_state (
 
 1. Первичная попытка: `openai/gpt-oss-120b`
 2. Резервная модель: `openai/gpt-oss-20b` (при недоступности основной)
+
+`/ask` и `/summary` выполняются как LangGraph-графы. Когда заданы
+`LANGFUSE_PUBLIC_KEY` и `LANGFUSE_SECRET_KEY`, Langfuse callback автоматически
+трассирует каждый узел и LLM-вызов внутри этих графов.
 
 ## Формат суммаризации
 

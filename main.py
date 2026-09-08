@@ -1,4 +1,5 @@
 import os
+import secrets
 
 import telebot
 from waitress import serve
@@ -8,7 +9,6 @@ from embeddings import warm_up
 from handlers.handlers import load_handlers
 from database.init_db import init_db
 from scheduler import start_scheduler
-from voice_transcription import warm_up as warm_up_whisper
 from webhook_server import create_app
 
 import urllib3
@@ -39,23 +39,11 @@ def start_app():
         print(f"Ошибка загрузки обработчиков: {e}")
         return
     try:
-        start_scheduler(bot)
-    except Exception as e:
-        print(f"Ошибка запуска планировщика саммари: {e}")
-        return
-    try:
         print("Прогреваю модель эмбеддингов...")
         warm_up()
         print("Модель эмбеддингов загружена")
     except Exception as e:
         print(f"Ошибка при загрузке модели эмбеддингов: {e}")
-        return
-    try:
-        print("Прогреваю модель Whisper...")
-        warm_up_whisper()
-        print("Модель Whisper загружена")
-    except Exception as e:
-        print(f"Ошибка при загрузке модели Whisper: {e}")
         return
     domain = os.getenv('RAILWAY_PUBLIC_DOMAIN')
     if not domain:
@@ -63,16 +51,18 @@ def start_app():
         return
 
     try:
-        webhook_url = f"https://{domain}/webhook/{token}"
+        webhook_secret = secrets.token_urlsafe(32)
+        webhook_url = f"https://{domain}/webhook"
         bot.remove_webhook()
-        bot.set_webhook(url=webhook_url)
+        bot.set_webhook(url=webhook_url, secret_token=webhook_secret)
         print(f"Webhook установлен: {webhook_url}")
     except Exception as e:
         print(f"Ошибка при установке webhook: {e}")
         return
 
     try:
-        app = create_app(bot, token)
+        start_scheduler(bot)
+        app = create_app(bot, webhook_secret)
         port = int(os.getenv('PORT', 8080))
         print(f"Бот запущен... (слушаю на порту {port})")
         serve(app, host='0.0.0.0', port=port)
