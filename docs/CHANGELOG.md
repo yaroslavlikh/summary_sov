@@ -4,6 +4,19 @@
 
 ---
 
+## 2026-09-09 (paired baseline vs oracle-memory runner — шаг 3)
+
+Новый [research/memory_benchmark_paired_run.py](../research/memory_benchmark_paired_run.py): поднимает sandbox и оба графа (`research/oracle_memory_eval.py`) ОДИН раз, гоняет все 44 вопроса из черновика через оба графа, пушит в Langfuse как ДВА именованных dataset-run эксперимента на одном датасете (`memory-benchmark-questions`) — `memory-benchmark-baseline` и `memory-benchmark-oracle` — чтобы сравнивать бок о бок в UI. Два новых judge'а в этом же файле (не в `tests/evals/judges.py` — те скорят против сырых окон сообщений, у этих есть прямой доступ к замороженному gold claim):
+
+- `memory_correctness` — совпадает ли ответ бота по смыслу с известным gold-фактом (0.0-1.0).
+- `memory_attribution` — только для `kind=opinion` или `epistemic_status=reported_by_other`: сохраняет ли ответ атрибуцию (не превращает мнение/пересказ в голый объективный факт).
+
+Локально также сохраняется paired JSON (вопрос, gold claim, оба ответа, retrieved oracle facts) — `/tmp/memory_benchmark_paired_results.json`, не в git.
+
+Вопросы намеренно НЕ отфильтрованы перед прогоном (первый диагностический прогон, кейсы нельзя будет выбросить задним числом после того как увидим результат). Старый `ask-pipeline-eval-run` (продовый /ask, к этому эксперименту не относится — память туда не подключена) запускается ОТДЕЛЬНО, после этого прогона, чисто как no-regression check.
+
+---
+
 ## 2026-09-09 (черновик датасета memory-dependent вопросов — шаг 2)
 
 Новый [research/build_memory_questions.py](../research/build_memory_questions.py) — по одному вопросу на КАЖДЫЙ из 44 gold positive фактов (не предварительно отфильтрованное подмножество "точно memory-dependent" — какие вопросы реально требуют памяти, а какие baseline и так найдёт по сырым сообщениям, покажет сам paired eval на шаге 3, отбирать заранее по своей догадке было бы selection bias).
