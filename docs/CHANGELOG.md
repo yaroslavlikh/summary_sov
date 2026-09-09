@@ -4,6 +4,22 @@
 
 ---
 
+## 2026-09-09 (oracle-memory retrieval: шаг 1 из плана baseline vs oracle /ask)
+
+После honest-recall находки (extraction — не главная идея статьи), новый порядок экспериментов: (1) oracle-memory retrieval, (2) датасет memory-dependent вопросов, (3) paired baseline vs oracle /ask, (4) no-regression check на существующем ask-pipeline-eval-run. Это шаг 1.
+
+Новый [research/oracle_memory_eval.py](../research/oracle_memory_eval.py) — использует замороженные 44 gold-факта как oracle-память (идеальная precision/recall by construction), намеренно изолируя качество retrieval/rerank/generation от качества extraction (которое уже честно измерено как слабое место — 23% fully-recovered). Sandbox-схема с реальными сообщениями/chat_context/chat_moments (копия, до `HISTORY_CUTOFF_MESSAGE_ID`) + 44 факта в `memory_facts`. Два графа на одной и той же sandboxed среде, отличаются только последним узлом:
+- `build_ask_graph_baseline()` — те же узлы, что в продакшн `build_ask_graph_merged()` (импортированы напрямую, не переписаны).
+- `build_ask_graph_oracle()` — тот же граф, только `generate_answer` дополнительно подмешивает `memory_facts.search_facts_by_vector` в `group_context`, аналогично тому, как туда уже подмешиваются `chat_moments`.
+
+MVP — только vector-ретрив (`memory_vector` branch из research doc, Sec 5.2); entity-based (`get_active_facts`, Sec 5.3) — следующая ablation-переменная, не подключена.
+
+По пути найден и исправлен баг: LangGraph инжектит `config` в узлы графа по имени/типу параметра (`RunnableConfig`) — верхнеуровневый `import config` (для dotenv) в скрипте случайно затенял ожидаемое имя, из-за чего первая попытка падала с "missing required positional argument".
+
+**Smoke-тест (3 вопроса, не полноценный eval)**: Крым — baseline теряет атрибуцию ("Крым — Россия"), oracle сохраняет ("Ярик считает, что..."); Игорь/Ксюша — оба одинаково верны (нужное сообщение и так попало в окно ретрива, память не понадобилась); VPN — оба верны, oracle надёжнее (добавляет "Sota" вне зависимости от того, попадёт ли конкретное сообщение в reranked-окно). Честно: 3 вопроса — не доказательство, это подтверждение, что механизм работает и стоит строить датасет (шаг 2).
+
+---
+
 ## 2026-09-09 (первый forced-extractor отчёт скорректирован: source coverage ≠ fact recall)
 
 Human review первого отчёта нашёл, что `loose`/`strict` метрики переобещали. Новый [research/reevaluate_forced_extractor.py](../research/reevaluate_forced_extractor.py) пересчитывает метрики из УЖЕ ЗАКЭШИРОВАННОГО вывода extractor'а (`/tmp/forced_extractor_output.json`) — extractor НЕ перезапускался, LLM-вызовов ноль:
