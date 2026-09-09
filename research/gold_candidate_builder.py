@@ -535,15 +535,28 @@ def _dedupe(candidates):
     duplicate is MERGED into the kept candidate (union of source_message_ids,
     both discovery_paths recorded, support upgraded if the new one is
     stronger) rather than discarded -- two independent paths agreeing on the
-    same fact is a useful corroboration signal, not noise to throw away."""
+    same fact is a useful corroboration signal, not noise to throw away.
+
+    Requires _resolve_subjects() to have already run: merging is gated on
+    matching subject_key (or normalized subject_raw when unresolved) AND
+    matching kind -- claim-embedding similarity ALONE is not safe across
+    different people. A real incident: Ярик's "Крым России" and Тигмен's
+    "Крым абсолютно точно часть России" are similar enough by embedding to
+    have merged into one candidate under Ярик's name with Тигмен's message
+    silently reassigned as if it were Ярик's -- exactly the attribution
+    collapse this whole research effort exists to prevent. See
+    tests/test_gold_candidate_builder.py for the regression test."""
     if not candidates:
         return []
     embeddings = [embed(c["claim"]) for c in candidates]
     kept = []
-    kept_embeddings = []
+    kept_meta = []  # (embedding, subject_bucket, kind) parallel to kept
     for cand, emb in zip(candidates, embeddings):
+        subj_bucket = cand.get("subject_key") or (cand.get("subject_raw") or "").strip().lower()
         merge_target = None
-        for i, kept_emb in enumerate(kept_embeddings):
+        for i, (kept_emb, kept_subj, kept_kind) in enumerate(kept_meta):
+            if subj_bucket != kept_subj or cand["kind"] != kept_kind:
+                continue
             dot = sum(a * b for a, b in zip(emb, kept_emb))
             na = sum(a * a for a in emb) ** 0.5
             nb = sum(b * b for b in kept_emb) ** 0.5
@@ -553,7 +566,7 @@ def _dedupe(candidates):
         if merge_target is None:
             cand.setdefault("discovery_paths", [cand["path"]])
             kept.append(cand)
-            kept_embeddings.append(emb)
+            kept_meta.append((emb, subj_bucket, cand["kind"]))
             continue
         merge_target["source_message_ids"] = sorted(set(merge_target["source_message_ids"]) | set(cand["source_message_ids"]))
         merge_target.setdefault("discovery_paths", [merge_target["path"]])
@@ -643,30 +656,83 @@ def _render_markdown(candidates, chat_id):
     return "\n".join(lines)
 
 
+VERIFIED_CACHE_PATH = "/tmp/gold_candidates_verified.json"
+
+
 def run():
+    """Full pipeline: runs the LLM discovery+verification+contradiction
+    stages (costly, non-deterministic -- re-running it produces a different
+    set of candidates each time). Subject resolution and contradiction
+    flagging happen HERE, before the cache is written, so the cached file
+    already carries subject_key/contradiction_note and reprocess_cached()
+    never needs an LLM call to reproduce them. The freshly verified
+    candidates are written ONCE to VERIFIED_CACHE_PATH and never touched
+    again by this function or by reprocess_cached() -- that file is the
+    immutable source of truth for everything downstream, specifically so a
+    resolver/render/dedup fix doesn't force throwing away and re-paying for
+    a real run."""
     a = discover_path_a(CHAT_ID)
     b = discover_path_b(CHAT_ID)
     all_candidates = a + b
-    print(f"\nTotal verified candidates before dedup: {len(all_candidates)}", file=sys.stderr)
+    print(f"\nTotal verified candidates: {len(all_candidates)}", file=sys.stderr)
 
     _resolve_subjects(CHAT_ID, all_candidates)
-    deduped = _dedupe(all_candidates)
-    print(f"After dedup: {len(deduped)}", file=sys.stderr)
+    _flag_contradictions(all_candidates)
 
-    _flag_contradictions(deduped)
+    with open(VERIFIED_CACHE_PATH, "w") as f:
+        json.dump(all_candidates, f, ensure_ascii=False, indent=2, default=str)
+    print(f"Verified candidates (immutable cache) written to {VERIFIED_CACHE_PATH}", file=sys.stderr)
 
-    with open("/tmp/gold_candidates_raw_v2.json", "w") as f:
-        json.dump(deduped, f, ensure_ascii=False, indent=2, default=str)
+    reprocess_cached(VERIFIED_CACHE_PATH)
 
-    selected = _select_best(deduped)
+
+def reprocess_cached(input_path=VERIFIED_CACHE_PATH, apply_dedup=False, max_per_subject=100, out_prefix="/tmp/gold_review_sheet"):
+    """Zero LLM calls -- only subject resolution (deterministic DB lookup,
+    participants.resolve_subject_for_fact) and rendering against an already
+    LLM-verified candidate cache. Exists so a code fix to the resolver,
+    dedup, or the sheet layout doesn't require an expensive, non-
+    deterministic full re-run of discovery+verification.
+
+    apply_dedup defaults to False: for a pool this size a human doing full
+    manual review can merge true duplicates by hand far more safely than an
+    embedding-similarity heuristic can -- one already, once, silently
+    reassigned one person's source message to another person's subject
+    (see _dedupe's docstring and tests/test_gold_candidate_builder.py).
+    Only turn it on for a corpus large enough that manual merging stops
+    being practical; _dedupe itself now refuses to merge across different
+    subject_key/kind, but that's a floor, not a guarantee of safety.
+
+    Never overwrites input_path -- writes to out_prefix + ".md"/".json"."""
+    with open(input_path) as f:
+        candidates = json.load(f)
+
+    _resolve_subjects(CHAT_ID, candidates)
+    if apply_dedup:
+        candidates = _dedupe(candidates)
+    print(f"Reprocessing {len(candidates)} candidates from {input_path} (apply_dedup={apply_dedup}, 0 LLM calls)", file=sys.stderr)
+
+    selected = _select_best(candidates, max_per_subject=max_per_subject)
     print(f"Selected for review sheet: {len(selected)}", file=sys.stderr)
 
     md = _render_markdown(selected, CHAT_ID)
-    out_path = "/tmp/gold_review_sheet_v2.md"
-    with open(out_path, "w") as f:
+    md_path = f"{out_prefix}.md"
+    with open(md_path, "w") as f:
         f.write(md)
-    print(f"\nReview sheet written to {out_path} ({len(selected)} candidates)", file=sys.stderr)
+
+    json_path = f"{out_prefix}_processed.json"
+    with open(json_path, "w") as f:
+        json.dump(candidates, f, ensure_ascii=False, indent=2, default=str)
+
+    print(f"Review sheet written to {md_path} ({len(selected)} candidates)", file=sys.stderr)
+    return md_path
 
 
 if __name__ == "__main__":
-    run()
+    if "--reprocess-cached" in sys.argv:
+        path = VERIFIED_CACHE_PATH
+        for arg in sys.argv[1:]:
+            if arg.startswith("--input="):
+                path = arg.split("=", 1)[1]
+        reprocess_cached(path, apply_dedup="--dedup" in sys.argv)
+    else:
+        run()
