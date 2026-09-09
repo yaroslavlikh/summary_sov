@@ -4,6 +4,21 @@
 
 ---
 
+## 2026-09-09 (первый forced-extractor отчёт скорректирован: source coverage ≠ fact recall)
+
+Human review первого отчёта нашёл, что `loose`/`strict` метрики переобещали. Новый [research/reevaluate_forced_extractor.py](../research/reevaluate_forced_extractor.py) пересчитывает метрики из УЖЕ ЗАКЭШИРОВАННОГО вывода extractor'а (`/tmp/forced_extractor_output.json`) — extractor НЕ перезапускался, LLM-вызовов ноль:
+
+- **`loose` переименован в `source_any`** и явно помечен как потолок (ceiling), не recall — кейс №67 "совпал" только потому что один извлечённый кандидат случайно процитировал то же message_id, при этом описывая три СОВЕРШЕННО другие вещи (портрет Игоря, Langfuse) вместо реального факта про тестирование бота Яриком.
+- **`strict` считал `subject_key=None` на обеих сторонах совпадением** — двое независимых "не смог резолвить" не значит "согласны, кто субъект". Исправлено: `subject_match` теперь True только когда ОБЕ стороны резолвились и совпали.
+- Добавлены `source_all` (все source gold покрыты одним кандидатом extractor'а — важно для multi-source), `claim_equivalent` и `attribution_preserved` — вручную размечены для всех 19 source_any-совпадений (маленький, полностью читаемый список, не автоматика на все 44), с обоснованием по каждому кейсу.
+- **Скорректированные цифры**: source_any 43% (19/44, потолок) → subject_match 27% (12/44) → claim_equivalent 32% (14/44) → **честный "fully recovered" (claim_equivalent И subject_match): 23% (10/44)**. Multi-source: 0/6 строго (единственный content-совпадающий кейс №58 "капитан/вискарь" проваливает subject_match — известный пробел резолвера на английской транслитерации "Sasha Tigmen", не новая проблема).
+- Найдены конкретные новые кейсы epistemic-регрессии в extractor'е: №43 — extractor присвоил Ване прямую речь, хотя источник это пересказ Тигмена (мисатрибуция хуже, чем у gold); №45 — extractor заново потерял атрибуцию и субъект (Игорь→Ксюша) — тот самый баг, который gold review специально фиксил для этого пункта.
+- **Frozen cutoff добавлен** в [research/forced_extractor_eval.py](../research/forced_extractor_eval.py): `HISTORY_CUTOFF_MESSAGE_ID = 73100` (макс. реальный message_id первого прогона) — без этого будущий перезапуск через недели молча захватил бы выросший чат, и результаты перестали бы быть сравнимыми. По пути найдена (не тронута, вне скоупа) одна аномальная строка `message_id=999999999, is_bot=TRUE` — не влияет ни на один прогон, так как везде фильтруется `is_bot=FALSE`.
+- `11/24 rejected resurfaced` оставлено как есть — отдельный сигнал, не precision.
+- Отчёт — `/tmp/forced_extractor_report_v2.md`, не в git.
+
+---
+
 ## 2026-09-09 (forced extractor построен и измерен против заморозенного gold)
 
 Новый [research/forced_extractor_eval.py](../research/forced_extractor_eval.py) реализует то, что было запланировано ещё до заморозки gold: forced JSON output вместо free-choice tool-calling, батчи по 40 сообщений вместо 180, temperature=0, ОДИН проход без отдельной verify-стадии (это и есть проверяемый механизм) — с детерминированной валидацией после генерации (source_message_ids сверяются с батчем, subject резолвится через `resolve_subject_for_fact`, без записи куда-либо). Промпт почти дословно взят из откалиброванного gold-mining Path B — изолирует именно тот вопрос, который стоял в плане: достаточно ли ОДНОГО дешёвого forced-JSON прохода без дорогой отдельной verification-стадии. Читает `/tmp/gold_facts.jsonl` с проверкой sha256-checksum (отказывается работать, если заморозенный файл изменился).

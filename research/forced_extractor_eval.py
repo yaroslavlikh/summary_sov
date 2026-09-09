@@ -53,6 +53,14 @@ from participants import resolve_subject_for_fact
 
 CHAT_ID = -1002335227490
 BATCH_SIZE = 40
+# The chat is live and keeps growing between runs -- without a fixed
+# cutoff, a rerun weeks later would silently extract from a different
+# (larger) corpus than the one gold was built and this was first measured
+# against, making results non-comparable. Pinned to the max real
+# message_id seen by this experiment's first run (verified against a
+# stray sentinel row: id 999999999/is_bot=TRUE exists in the table but is
+# excluded by the is_bot=FALSE filter below regardless).
+HISTORY_CUTOFF_MESSAGE_ID = 73100
 MAX_WORKERS = 5
 
 GOLD_PATH = "/tmp/gold_facts.jsonl"
@@ -152,8 +160,8 @@ def run_extraction(chat_id):
         cursor = conn.cursor()
         cursor.execute(
             "SELECT message_id, user_name, username, message FROM messages "
-            "WHERE user_id = %s AND is_bot = FALSE ORDER BY id ASC",
-            (chat_id,),
+            "WHERE user_id = %s AND is_bot = FALSE AND message_id <= %s ORDER BY id ASC",
+            (chat_id, HISTORY_CUTOFF_MESSAGE_ID),
         )
         all_rows = cursor.fetchall()
     chunks = [all_rows[i:i + BATCH_SIZE] for i in range(0, len(all_rows), BATCH_SIZE)]
