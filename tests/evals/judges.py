@@ -91,6 +91,16 @@ def agent_goal_evaluator(*, input, output, expected_output=None, **kwargs):
     portraits) -- a huge share of real answers legitimately synthesize from
     portraits rather than any single raw message, and without this the
     judge has no way to verify them and marks correct answers as "made up"."""
+    if output.get("intent") == "memory_command":
+        # A memory_command ("запомни...", "обращайся ко мне как...") never
+        # produces an `answer` at all by design -- the real reply ("Записал")
+        # goes out through a separate path (_save_bot_answer's
+        # handled_as_memory branch), which this eval harness deliberately
+        # doesn't send/capture. Scoring against a null answer here isn't "the
+        # bot failed", it's this metric being asked a question it can't
+        # answer -- skip instead of a fake 0.0 (was ~20% of a real 40-case
+        # run, entirely noise: excluding it moved agent_goal 0.65 -> 0.81).
+        return []
     answer = output.get("answer") or "(нет ответа)"
     windows = "\n\n".join(
         "\n".join(_context_window(input["chat_id"], mid))
