@@ -207,6 +207,15 @@ def _classify_and_rewrite(state: AskState, config: RunnableConfig) -> AskState:
             pass
 
     if intent == "memory_command" and memory_note:
+        # The model is instructed to default memory_target to the asker for
+        # self-referential commands ("подлизывайся КО МНЕ"), but doesn't
+        # reliably follow that -- a real one landed as an ungrounded general
+        # note instead of Игорь's portrait, meaning "suck up to him"
+        # silently became "suck up to everyone". Backstop deterministically:
+        # if the model left memory_target empty AND the original message is
+        # clearly first-person, it's about the asker, not a stray group fact.
+        if not memory_target and re.search(r"\b(мне|меня|мной|мой|моя|моё|мои)\b", state["question"], re.IGNORECASE):
+            memory_target = state["asker_name"]
         write_memory = state.get("write_memory") or _default_write_memory
         write_memory(state["chat_id"], memory_target, memory_note)
         return {"intent": intent, "handled_as_memory": True, "memory_reply": "Записал"}
