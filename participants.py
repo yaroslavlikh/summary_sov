@@ -23,12 +23,18 @@ Two entry points:
   author, resolve to them. Only when neither signal applies does it fall
   back to plain name matching, which can still legitimately go ambiguous.
 """
+import re
+
 from database.db import get_conn
 from display_names import DISPLAY_NAMES, DISPLAY_NAMES_BY_FIRST_NAME, resolve_display_name
 
 
 def _normalize(s):
-    return (s or "").strip().lower()
+    # LLM-produced name hints sometimes use non-standard whitespace (e.g.
+    # U+202F narrow no-break space) where a real chat name has a plain
+    # space -- collapse any whitespace run to one regular space so those
+    # still match instead of silently going "ambiguous"/unresolved.
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
 
 
 def _participant_key(username, user_name):
