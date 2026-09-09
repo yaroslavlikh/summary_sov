@@ -4,3 +4,6 @@ database/__pycache__
 handlers/__pycache__
 llm/__pycache__
 result.json
+# Raw chat-derived research outputs -- real names/health/politics/etc, never commit
+research/*review_sheet*.md
+research/*_candidates*.json
