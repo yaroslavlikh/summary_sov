@@ -4,6 +4,19 @@
 
 ---
 
+## 2026-09-09 (gold заморожен: схема достроена, checksum зафиксирован)
+
+Перед заморозкой пользователь явно подтвердил все 11 правок (4 edit + исключение №31 + 7 attribution-fix) и попросил достроить схему `gold_facts.jsonl` без LLM. [research/build_gold_facts.py](../research/build_gold_facts.py) доработан:
+
+- `label: hard_negative` → `label: rejected_candidate` — "human rejected" не то же самое, что "confirmed negative для оценки extractor'а"; переименование убирает лишнее заявление.
+- Добавлены `original_claim` (текст до edit/attribution-fix, для всех записей, не только изменённых), `human_decision` (сырое accept/edit/reject, отдельно от производного `label`), `observed_at` (диапазон дат source-сообщений, парсится из sheet), `subject_key` — пересчитан заново через `participants.resolve_subject_for_fact` (детерминированный DB lookup, без LLM, без записи) вместо доверия отображаемому в sheet тексту, чтобы `gold_facts.jsonl` не зависел от возможно устаревшего порядка в JSON-кэше.
+- `subject_ambiguous` → `subject_unresolved` — бот/GPT/группа/третьи лица не являются "неоднозначными людьми", просто не резолвятся к участнику чата.
+- Добавлен sha256-checksum файла (`/tmp/gold_facts.sha256`), фиксирующий именно эту версию как замороженную.
+- Финальные цифры не изменились: 44 positive (6 multi-source), 24 rejected_candidate, 4 исключено. 0 случаев `subject_key=None` при `subject_unresolved=False` (т.е. резолвер либо честно резолвит, либо честно помечает неразрешённость — расхождений не найдено).
+- **Gold заморожен.** Следующий шаг — forced extractor: recall по 44 known positive, ложные срабатывания на 24 rejected_candidate, отдельно результат на 6 multi-source. Не полноценный precision/recall (история не размечена исчерпывающе), но первый честный эксперимент.
+
+---
+
 ## 2026-09-09 (первый gold заморожен: 44 positive + 24 hard negative)
 
 Человек размeтил все 72 кандидата v2.2 (`research/gold_review_sheet_annotated.md`, gitignored): 40 accept + 5 edit + 24 reject + 3 ambiguous. Новый [research/build_gold_facts.py](../research/build_gold_facts.py) парсит разметку напрямую из markdown (решения читаются оттуда, не из кэша — порядок между JSON-кэшем и отрендеренным sheet не гарантированно совпадает после сортировки по support) и строит `/tmp/gold_facts.jsonl` (не в git, реальный чат-контент):

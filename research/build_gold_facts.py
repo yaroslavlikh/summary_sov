@@ -2,25 +2,36 @@
 (research/gold_review_sheet_annotated.md -- gitignored, real chat content:
 names, health, politics, self-harm mentions).
 
-accept + edit -> positive facts. edit substitutes a hand-fixed claim text
-from EDITS below -- the sheet's own "edited_claim" field was left blank in
-the annotated copy, the user gave the 5 replacement texts directly in chat
-instead. reject -> hard negatives (kept, not discarded -- useful later for
-precision checks on the forced extractor). ambiguous attribution ->
-excluded entirely.
+accept + edit -> label positive. reject -> label rejected_candidate (kept,
+not discarded -- useful later to check whether the forced extractor
+proposes junk the human already rejected once, but deliberately NOT called
+"hard_negative": a human rejecting a candidate doesn't mean "the extractor
+must never produce this," just that this particular framing/claim didn't
+hold up -- calling it a confirmed negative would overclaim). ambiguous
+attribution -> excluded entirely, and so is #31 (marked "edit" but the
+edit itself doesn't resolve the ambiguity -- unclear whose name is claimed
+to come from an Indian barista).
 
 On top of the human decisions, a hand-curated set of ACCEPTED opinion-kind
 claims that stated a subjective view as if it were an objective fact get
 their attribution fixed -- see ATTRIBUTION_FIXES. Found by scanning every
 accepted opinion-kind claim for missing "считает"/"по словам"/"написал"
-framing: 4 were named directly by the user (Крым x2, Гордей, Ксюша), 3 more
+framing: 4 named directly by the user (Крым x2, Гордей, Ксюша), 3 more
 found by extending the same check to the rest of the accepted opinion pool
-(#19/#22 Israel opinions, #42 handcuffs opinion). This is a manual fix, not
-an LLM call -- consistent with the "no more automated passes on this pool"
-decision from the review that found the dedup attribution-collapse bug.
+(#19/#22 Israel opinions, #42 handcuffs opinion). All 11 changes (4 edits +
+exclusion of #31 + 7 attribution fixes) were explicitly confirmed by the
+user before freezing. Manual fix, not an LLM call -- consistent with the
+"no more automated passes on this pool" decision from the review that
+found the dedup attribution-collapse bug.
+
+subject_key is re-derived here via participants.resolve_subject_for_fact
+(deterministic DB lookup, no LLM, no writes) rather than trusted from the
+sheet's display text, so gold_facts.jsonl is self-contained and doesn't
+depend on the JSON cache's now-possibly-stale ordering.
 
 Usage: python3 -m research.build_gold_facts
 """
+import hashlib
 import json
 import re
 import sys
@@ -28,8 +39,13 @@ from collections import Counter
 
 sys.path.insert(0, "/Users/yaroslavlikh/summary_sov")
 
+import config  # noqa: triggers dotenv load
+from participants import resolve_subject_for_fact
+from research.gold_candidate_builder import CHAT_ID
+
 ANNOTATED_PATH = "/Users/yaroslavlikh/summary_sov/research/gold_review_sheet_annotated.md"
 OUT_PATH = "/tmp/gold_facts.jsonl"
+CHECKSUM_PATH = "/tmp/gold_facts.sha256"
 
 EDITS = {
     8: "1 сентября 2026 года Ярик сообщил, что у него продолжаются летние каникулы.",
@@ -37,8 +53,6 @@ EDITS = {
     25: "Ярик предложил в будущем добавить боту чатовый режим.",
     34: "На 3 сентября 2026 года Ярик пользовался VPN Sota.",
 }
-# #31 was marked "edit" but the user wants it dropped entirely as ambiguous
-# (unclear whose name is claimed to come from an Indian barista).
 EXCLUDE_DESPITE_EDIT = {31}
 
 ATTRIBUTION_FIXES = {
@@ -90,6 +104,7 @@ def _parse_annotated(path):
             "subject": field("Subject"),
             "epistemic_status": field("Epistemic status"),
             "support": field("Suggested support"),
+            "observed_at": field(r"Observed at \(source message dates\)"),
             "sources": sources,
             "decisions_found": decisions_found,
             "decision": decisions_found[0] if len(decisions_found) == 1 else None,
@@ -111,45 +126,56 @@ def build():
     if dict(tally) != expected:
         print(f"WARNING: tally mismatch, expected {expected}", file=sys.stderr)
 
+    label_map = {"accept": "positive", "edit": "positive", "reject": "rejected_candidate"}
+
     facts = []
     changed = []
-    excluded_ambiguous = []
+    excluded = []
     for item in items:
         num = item["num"]
         if item["decision"] == "ambiguous attribution":
-            excluded_ambiguous.append((num, item["claim"]))
+            excluded.append((num, item["claim"], "ambiguous attribution"))
             continue
         if num in EXCLUDE_DESPITE_EDIT:
-            excluded_ambiguous.append((num, item["claim"]))
+            excluded.append((num, item["claim"], "edit doesn't resolve genuine ambiguity"))
             continue
         if item["decision"] not in ("accept", "edit", "reject"):
             print(f"WARNING: item #{num} has no single clear decision, skipped entirely", file=sys.stderr)
             continue
 
-        claim = item["claim"]
+        original_claim = item["claim"]
+        claim = original_claim
         if num in EDITS:
-            changed.append((num, claim, EDITS[num], "manual edit (user-specified)"))
+            changed.append((num, original_claim, EDITS[num], "manual edit (user-specified, confirmed)"))
             claim = EDITS[num]
         elif num in ATTRIBUTION_FIXES:
-            changed.append((num, claim, ATTRIBUTION_FIXES[num], "attribution fix (opinion stated as objective fact)"))
+            changed.append((num, original_claim, ATTRIBUTION_FIXES[num], "attribution fix (confirmed)"))
             claim = ATTRIBUTION_FIXES[num]
 
         kind = KIND_FIXES.get(num, item["kind"])
-        label = "positive" if item["decision"] in ("accept", "edit") else "hard_negative"
+        label = label_map[item["decision"]]
 
-        subject_raw = item["subject"] or ""
-        subject_ambiguous = "⚠" in subject_raw
+        subject_raw = (item["subject"] or "")
+        subject_unresolved = "⚠" in subject_raw
         subject = subject_raw.split("⚠")[0].strip()
+        source_ids = [s["message_id"] for s in item["sources"]]
+
+        resolved = resolve_subject_for_fact(CHAT_ID, subject, source_ids) if subject else None
+        subject_key = resolved[0] if resolved else None
 
         facts.append({
             "id": num,
             "label": label,
+            "human_decision": item["decision"],
             "claim": claim,
+            "original_claim": original_claim,
             "kind": kind,
             "subject": subject,
-            "subject_ambiguous": subject_ambiguous,
+            "subject_key": subject_key,
+            "subject_unresolved": subject_unresolved,
             "epistemic_status": item["epistemic_status"],
-            "source_message_ids": [s["message_id"] for s in item["sources"]],
+            "observed_at": item["observed_at"],
+            "source_message_ids": source_ids,
             "sources": item["sources"],
         })
 
@@ -157,16 +183,26 @@ def build():
         for fact in facts:
             f.write(json.dumps(fact, ensure_ascii=False) + "\n")
 
+    checksum = hashlib.sha256(open(OUT_PATH, "rb").read()).hexdigest()
+    with open(CHECKSUM_PATH, "w") as f:
+        f.write(f"{checksum}  {OUT_PATH}\n")
+
     n_pos = sum(1 for f in facts if f["label"] == "positive")
-    n_neg = sum(1 for f in facts if f["label"] == "hard_negative")
+    n_neg = sum(1 for f in facts if f["label"] == "rejected_candidate")
     multi_source = sum(1 for f in facts if f["label"] == "positive" and len(f["source_message_ids"]) > 1)
+    n_subject_unresolved = sum(1 for f in facts if f["subject_unresolved"])
+    n_subject_key_none = sum(1 for f in facts if f["subject_key"] is None and not f["subject_unresolved"])
 
     print(f"\nWrote {len(facts)} facts to {OUT_PATH}", file=sys.stderr)
     print(f"  positive: {n_pos} (of which multi-source: {multi_source})", file=sys.stderr)
-    print(f"  hard_negative: {n_neg}", file=sys.stderr)
-    print(f"  excluded (ambiguous): {len(excluded_ambiguous)} -- {[n for n, _ in excluded_ambiguous]}", file=sys.stderr)
+    print(f"  rejected_candidate: {n_neg}", file=sys.stderr)
+    print(f"  excluded: {len(excluded)} -- {[(n, reason) for n, _, reason in excluded]}", file=sys.stderr)
+    print(f"  subject_unresolved (bot/group/third-party, not a real ambiguity): {n_subject_unresolved}", file=sys.stderr)
+    if n_subject_key_none:
+        print(f"  WARNING: {n_subject_key_none} facts have subject_key=None but subject_unresolved=False (genuine resolver miss, check manually)", file=sys.stderr)
+    print(f"  checksum (sha256): {checksum}", file=sys.stderr)
 
-    print("\n=== Changed claims ===", file=sys.stderr)
+    print("\n=== Changed claims (all confirmed) ===", file=sys.stderr)
     for num, old, new, reason in changed:
         print(f"#{num} [{reason}]", file=sys.stderr)
         print(f"  was: {old}", file=sys.stderr)
