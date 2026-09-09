@@ -149,27 +149,28 @@ def _generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18, t
             bot.send_message(chat_id, "Нет сообщений для суммаризации", message_thread_id=thread_id)
             return
 
+        # Two separate line formats from the same rows: `lines` keeps small
+        # sequential [1..N] citations for the user-facing summary text (a
+        # summary littered with raw message_id numbers like [72831] instead
+        # of [1] is a real readability regression); `extraction_lines`
+        # additionally tags each line with its real message_id so the
+        # memory-extraction tool-calling pass (prompt_for_context_extraction)
+        # can report honest, externally-checkable source_message_ids without
+        # degrading what the user actually sees.
         legend = {}
         lines = []
-        for row_id, msg_id, msg_thread_id, user_name, username, text, replied in rows:
-            # Keyed by the REAL Telegram message_id, not a synthetic local
-            # index -- _format_citations only needs legend/citation numbers
-            # to match, so this works as a citation key exactly like the old
-            # 1..N scheme did, but also lets memory extraction (see
-            # memory_facts.py / prompt_for_context_extraction) cite real,
-            # externally-checkable source_message_ids instead of a number
-            # that's meaningless outside this one summary batch. Rows
-            # without a message_id (rare legacy edge case) get the internal
-            # row id instead, purely so the citation number is never a
-            # broken "[None]" -- they just won't resolve to a legend link.
-            cite_id = msg_id if msg_id is not None else row_id
-            legend[cite_id] = build_message_link(chat_id, msg_id, msg_thread_id)
+        extraction_lines = []
+        for idx, (row_id, msg_id, msg_thread_id, user_name, username, text, replied) in enumerate(rows, start=1):
+            legend[idx] = build_message_link(chat_id, msg_id, msg_thread_id)
             author = resolve_display_name(username, user_name)
-            entry = f"[{cite_id}] {author}: {decrypt(text)}"
+            plain_text = decrypt(text)
+            entry = f"[{idx}] {author}: {plain_text}"
             replied_plain = decrypt(replied)
             if replied_plain and replied_plain != "Отмеченного сообщения нет":
                 entry += f" (ответ на: {replied_plain})"
             lines.append(entry)
+            id_tag = f"message_id={msg_id}" if msg_id is not None else "message_id=unknown"
+            extraction_lines.append(f"[{idx}] {{{id_tag}}} {author}: {plain_text}")
 
         prompt_body = ""
         if last_summary_text:
@@ -189,6 +190,8 @@ def _generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18, t
         "bot": bot,
         "prompt_body": prompt_body,
         "lines": lines,
+        "extraction_lines": extraction_lines,
+        "batch_message_ids": {msg_id for _, msg_id, *_ in rows if msg_id is not None},
         "legend": legend,
         "max_lines": requested_m,
         "newest_included_id": newest_included_id,

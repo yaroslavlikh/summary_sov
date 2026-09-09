@@ -4,6 +4,21 @@
 
 ---
 
+## 2026-09-09 (Stage 1 hardening)
+
+Прямое следствие реального прод-бага (self-referential memory_target не резолвился) — усилил весь write-контракт `upsert_state`, прежде чем идти дальше к retrieval/reranker'у:
+
+- **Нормализация человека** — новый [participants.py](../participants.py): `resolve_participant_key(chat_id, name_hint)` резолвит свободный текст ("Миша"/"Мишаня") к стабильному `participant_key` (username, либо нормализованное имя) среди РЕАЛЬНЫХ участников этого чата. Неоднозначный/неизвестный subject → `upsert_state` кидает `ValueError`, факт НЕ пишется автоматически (не молча привязывается к случайному ключу).
+- **`observed_at` считается сервером** — `MAX(source messages.message_date)`, дате от модели больше не доверяем вообще (параметр убран из сигнатуры).
+- **`state_key` ограничен фиксированным набором** ([memory_facts.py](../memory_facts.py) `ALLOWED_STATE_KEYS`): `current_location, work_study, availability, relationship, preference, plan`. Всё остальное → `state_key=None`, факт всё равно пишется, но не supersede'ит.
+- **Citation label vs реальный ID разделены** — `/summary` для пользователя снова видит `[1..N]` (не деградирует читаемость огромными message_id), а extraction-проход получает отдельный `extraction_lines` с явным `{message_id=X}` тегом на каждой строке ([handlers/handlers.py](../handlers/handlers.py), [llm/prompt.py](../llm/prompt.py)).
+- **Dry-run extraction** — `upsert_state`-тул в [llm/graphs.py](../llm/graphs.py) принимает `write_state` колбэк (`build_summary_graph`/`run_summary_graph`), по умолчанию — реальная запись, для исследования — сборщик в JSON без единой записи в БД.
+- **11 тестов** ([tests/test_memory_facts.py](../tests/test_memory_facts.py), unittest, реальный sandbox-Postgres): пустой/чужой provenance отклоняется, неизвестный subject отклоняется, алиасы резолвятся в один ключ, невалидный state_key занижается до None, новое состояние supersede'ит старое, `state_key=None` копится, разные люди не supersede'ят друг друга, `observed_at` берётся из сообщений, истёкший факт не возвращается, source вне текущего batch отклоняется. Все зелёные.
+- Схема: новая колонка `memory_facts.subject_display` — человекочитаемое имя рядом с ключом, чтобы retrieval не делал лишний lookup.
+- `research/dry_run_extraction_full_history.py` — прогон extraction по всей реальной истории (sandbox, `write_state=collect`, ничего не пишет в прод) для сбора gold-датасета кандидатов.
+
+---
+
 ## 2026-09-09 (вдогонку 2)
 
 - **Реальный прод-баг: self-referential memory-команда попала в общую заметку вместо портрета человека.** Живое сообщение *«когда будешь отвечать мне старайся максимально сильно подлизываться ко мне»* от Игоря — `_classify_and_rewrite` вернул `memory_target: null` (модель ненадёжно следует инструкции "я/меня → имя автора" из промпта), и факт улетел в `add_note` как общая заметка чата вместо `upsert_portrait` для Игоря — то есть эффективно "подлизывайся ко всем", а не к конкретному человеку. Добавлен детерминированный backstop в [llm/graphs.py](../llm/graphs.py): если `memory_target` пуст и в исходном вопросе есть явные первого-лица маркеры (мне/меня/мной/мой/моя/моё/мои) — `memory_target` = `asker_name`, без надежды на LLM. Проверено на точном реальном сообщении. Испорченные прод-данные исправлены вручную: факт перенесён в портрет Игоря (`chat_context` id 38), неправильная общая заметка удалена.

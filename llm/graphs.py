@@ -523,6 +523,9 @@ class SummaryState(TypedDict, total=False):
     bot: Any
     prompt_body: str
     lines: list[str]
+    extraction_lines: list[str]
+    batch_message_ids: set[int]
+    write_state: Optional[Callable[..., Any]]
     legend: dict[int, Optional[str]]
     max_lines: int
     newest_included_id: int
@@ -546,7 +549,8 @@ def _send_summary(state: SummaryState) -> SummaryState:
     state["bot"].send_message(
         state["chat_id"], f"#summary\n\n{rendered}", parse_mode="HTML", message_thread_id=state.get("thread_id")
     )
-    return {"messages": [HumanMessage(content=prompt_for_context_extraction.format(messages="\n".join(state["lines"])))]}
+    extraction_source = state.get("extraction_lines") or state["lines"]
+    return {"messages": [HumanMessage(content=prompt_for_context_extraction.format(messages="\n".join(extraction_source)))]}
 
 
 def _save_summary_state(state: SummaryState) -> SummaryState:
@@ -559,7 +563,20 @@ def _send_summary_failure(state: SummaryState) -> SummaryState:
     return {}
 
 
-def build_summary_graph(chat_id: int, batch_message_ids: Optional[set[int]] = None):
+def _filter_to_batch(source_message_ids, batch_message_ids):
+    """Which of source_message_ids were actually part of THIS summary batch
+    -- an extraction model citing a real message_id from elsewhere in chat
+    history (not hallucinated, just out of scope) must not silently pass as
+    provenance for a fact extracted from a different batch."""
+    batch_ids = batch_message_ids or set()
+    return [mid for mid in (source_message_ids or []) if mid in batch_ids]
+
+
+def build_summary_graph(
+    chat_id: int,
+    batch_message_ids: Optional[set[int]] = None,
+    write_state: Optional[Callable[..., Any]] = None,
+):
     @tool
     def update_portrait(person: str, addition: str, source: str) -> str:
         """Записать характерную черту или факт о человеке."""
@@ -591,12 +608,12 @@ def build_summary_graph(chat_id: int, batch_message_ids: Optional[set[int]] = No
         # also actually be part of THIS summary batch, not just anywhere in
         # chat history -- an extraction model hallucinating a plausible-
         # looking but wrong message_id must not silently pass.
-        batch_ids = batch_message_ids or set()
-        valid_ids = [mid for mid in (source_message_ids or []) if mid in batch_ids]
+        valid_ids = _filter_to_batch(source_message_ids, batch_message_ids)
         if not valid_ids:
             return "Ошибка: source_message_ids не найдены в текущем batch, факт не записан"
+        writer = write_state or upsert_memory_state
         try:
-            upsert_memory_state(
+            writer(
                 chat_id, subject, state_key or None, kind or "other", claim,
                 retrieval_cues or [], valid_ids,
             )
@@ -628,5 +645,6 @@ def build_summary_graph(chat_id: int, batch_message_ids: Optional[set[int]] = No
 
 
 def run_summary_graph(state: SummaryState) -> SummaryState:
-    batch_message_ids = {mid for mid in (state.get("legend") or {}) if isinstance(mid, int)}
-    return build_summary_graph(state["chat_id"], batch_message_ids).invoke(state, config=_config())
+    batch_message_ids = state.get("batch_message_ids") or set()
+    graph = build_summary_graph(state["chat_id"], batch_message_ids, state.get("write_state"))
+    return graph.invoke(state, config=_config())

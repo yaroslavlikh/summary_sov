@@ -166,6 +166,7 @@ def init_db():
                 id BIGSERIAL PRIMARY KEY,
                 chat_id BIGINT NOT NULL,
                 subject_key TEXT,
+                subject_display TEXT,
                 state_key TEXT,
                 kind TEXT NOT NULL,
                 claim TEXT NOT NULL,
@@ -179,6 +180,13 @@ def init_db():
                 source_message_ids BIGINT[] NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now()
             );""")
+        # Stage 1 hardening: subject_key is now a resolved, stable
+        # participant_key (Telegram username, or normalized first_name for
+        # username-less senders) via participants.resolve_participant_key --
+        # not whatever free-text name the extraction model happened to
+        # write. subject_display keeps a human-readable name alongside it so
+        # retrieval doesn't need a live lookup back to `messages`.
+        cursor.execute("ALTER TABLE memory_facts ADD COLUMN IF NOT EXISTS subject_display TEXT;")
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS memory_facts_active_idx ON memory_facts "
             "(chat_id, subject_key) WHERE active = TRUE;"
