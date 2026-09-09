@@ -6,18 +6,23 @@ evidence. A row here always carries source_message_ids, and an update is an
 event (old row closed + superseded_by), not an overwrite -- so a later
 contradicting fact doesn't erase what was true when.
 
-Hardening (Stage 1 hardening PR): subject is resolved to a stable, known
-participant (never a raw free-text name the model made up -- ambiguous or
-unknown subjects are refused, not written under a garbage key);
-observed_at is computed server-side from source messages' real message_date,
-never trusted from the model; state_key is restricted to a fixed enum, so
-the model can't fragment "current_location"/"location"/"city" into separate
-un-superseding buckets.
+Hardening (Stage 1 hardening PR): subject is resolved via
+participants.resolve_subject_for_fact -- prefers who actually WROTE the
+source messages (or who a reply targets) over guessing from a name string,
+falling back to plain name matching only when neither signal applies.
+Ambiguous or unknown subjects are refused, never silently written under a
+guessed key -- including refusing to prefer a "known"/curated identity over
+an uncurated one just because it's in a lookup table, since that would
+recreate the exact attribution-collapse failure this system exists to
+avoid. observed_at is computed server-side from source messages' real
+message_date, never trusted from the model. state_key is restricted to a
+fixed enum, so the model can't fragment "current_location"/"location"/
+"city" into separate un-superseding buckets.
 """
 from crypto_utils import decrypt, encrypt
 from database.db import get_conn
 from embeddings import embed, to_vector_literal
-from participants import resolve_participant_key
+from participants import resolve_subject_for_fact
 
 ALLOWED_STATE_KEYS = {
     "current_location", "work_study", "availability",
@@ -63,7 +68,7 @@ def upsert_state(
     of ALLOWED_STATE_KEYS (silently downgraded to None instead -- a fact
     that doesn't fit the fixed vocabulary still gets recorded, it just
     never supersedes anything), or if source_message_ids don't check out."""
-    resolved = resolve_participant_key(chat_id, subject_hint)
+    resolved = resolve_subject_for_fact(chat_id, subject_hint, source_message_ids)
     if resolved is None:
         raise ValueError(
             f"subject {subject_hint!r} doesn't unambiguously match a known participant of chat {chat_id} -- not written"

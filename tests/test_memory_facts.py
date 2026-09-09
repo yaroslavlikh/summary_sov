@@ -72,6 +72,10 @@ class MemoryFactsTestCase(unittest.TestCase):
         _insert_message(CHAT_ID, 68125, "Misha", "misha_tg", "В Москве бываю редко.", 1_700_000_100)
         _insert_message(CHAT_ID, 68200, "Misha", "misha_tg", "Вернулся в Москву.", 1_700_100_000)
         _insert_message(CHAT_ID, 68300, "Yaroslav", "yaroslavlikh", "Го в бильярд.", 1_700_000_050)
+        # Two real, distinct people sharing a raw first_name -- the exact
+        # shape of the real "two Игорей" bug this resolver rewrite fixes.
+        _insert_message(CHAT_ID, 68500, "Duplicate", "dup_user1", "тест1", 1_700_000_200)
+        _insert_message(CHAT_ID, 68501, "Duplicate", None, "тест2", 1_700_000_210)
 
     @classmethod
     def tearDownClass(cls):
@@ -98,6 +102,29 @@ class MemoryFactsTestCase(unittest.TestCase):
             self.mf.upsert_state(
                 CHAT_ID, "СовершенноНеизвестныйЧеловек", "current_location", "location",
                 "кто-то переехал", ["где"], source_message_ids=[68121],
+            )
+
+    # ---- source-author-first: self-referential resolves deterministically,
+    # even when the bare name is otherwise ambiguous ----
+    def test_self_referential_resolves_to_message_author(self):
+        resolved = self.mf.upsert_state(
+            CHAT_ID, "Duplicate", "current_location", "location",
+            "Duplicate живёт в Казани", ["где Duplicate"], source_message_ids=[68500],
+        )
+        self.assertIsNotNone(resolved)
+        with db.get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT subject_key FROM memory_facts WHERE id = %s", (resolved,))
+            subject_key = cur.fetchone()[0]
+        self.assertEqual(subject_key, "dup_user1")  # the one who actually wrote message 68500
+
+    # ---- a genuinely ambiguous bare name (two real people, neither the
+    # author nor a reply target) is rejected, not resolved via curation ----
+    def test_third_party_ambiguous_name_rejected(self):
+        with self.assertRaises(ValueError):
+            self.mf.upsert_state(
+                CHAT_ID, "Duplicate", "current_location", "location",
+                "кто-то из Duplicate куда-то переехал", ["где"], source_message_ids=[68300],  # Yaroslav's message, not either Duplicate's
             )
 
     # ---- 3. subject alias resolves consistently ----

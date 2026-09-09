@@ -139,17 +139,43 @@ try:
             "save_summary_state": lambda *a, **kw: None,
             "write_state": make_collector(batch_no + 1),
         }
-        try:
-            g.run_summary_graph(state)
-        except Exception as e:
-            print(f"  batch {batch_no + 1} failed: {e}", file=sys.stderr)
 
-    print(f"\n\n=== TOTAL candidates: {len(candidates)} ===")
+        def _count_context():
+            with db.get_conn() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) FROM chat_context WHERE chat_id = %s", (CHAT_ID,))
+                ctx = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM chat_moments WHERE chat_id = %s", (CHAT_ID,))
+                mom = cur.fetchone()[0]
+            return ctx, mom
+
+        before_ctx, before_mom = _count_context()
+        try:
+            # Bypass run_summary_graph's Langfuse tracing for this offline
+            # research run -- a Langfuse read-timeout killed batch 4 outright
+            # in the first attempt (broke the pooled Postgres connection
+            # too), and tracing isn't needed to see what extraction proposes.
+            graph = g.build_summary_graph(CHAT_ID, batch_message_ids, state["write_state"])
+            graph.invoke(state, config={"recursion_limit": 20})
+        except Exception as e:
+            print(f"  batch {batch_no + 1} FAILED: {type(e).__name__}: {e}", file=sys.stderr)
+        after_ctx, after_mom = _count_context()
+        print(
+            f"  batch {batch_no + 1}: +{after_ctx - before_ctx} chat_context, "
+            f"+{after_mom - before_mom} chat_moments, "
+            f"+{len([c for c in candidates if c['batch'] == batch_no + 1])} upsert_state candidates",
+            file=sys.stderr,
+        )
+
+    print(f"\n\n=== TOTAL upsert_state candidates: {len(candidates)} ===")
     for c in candidates:
         print(json.dumps(c, ensure_ascii=False))
 
     resolved_ok = [c for c in candidates if not c["ambiguous_or_unknown"]]
     print(f"\nresolved (would be written): {len(resolved_ok)} / {len(candidates)}", file=sys.stderr)
+
+    final_ctx, final_mom = _count_context()
+    print(f"\nFinal sandbox chat_context rows: {final_ctx}, chat_moments rows: {final_mom}", file=sys.stderr)
 
     with open("/tmp/dry_run_candidates.json", "w") as f:
         json.dump(candidates, f, ensure_ascii=False, indent=2)
