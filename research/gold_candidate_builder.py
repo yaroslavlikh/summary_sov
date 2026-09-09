@@ -67,7 +67,7 @@ from display_names import resolve_display_name
 from embeddings import embed, to_vector_literal
 from llm.graphs import _or_query, _rrf
 from llm.groq_client import get_chat_model
-from participants import resolve_participant_key
+from participants import resolve_subject_for_fact
 
 CHAT_ID = -1002335227490
 RAW_CHUNK_SIZE = 40
@@ -120,6 +120,39 @@ def _local_context(chat_id, message_id, span=3):
         author = "БОТ" if is_bot else resolve_display_name(uname, name)
         out.append(f"[{mid}] {author}: {text}")
     return out
+
+
+def _local_context_multi(chat_id, message_ids, span=3):
+    """Bot-inclusive local context around EACH of message_ids (not just the
+    first), merged and deduped by message_id -- a multi-source candidate
+    whose sources are far apart (e.g. two replies with a big gap) should
+    show that gap to the reviewer instead of hiding it behind a window
+    around only the first source."""
+    ids = sorted(set(message_ids))
+    if not ids:
+        return []
+    seen = {}
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        for mid in ids:
+            cursor.execute(
+                """
+                SELECT message_id, user_name, username, message, is_bot
+                FROM messages WHERE user_id = %s AND message_id BETWEEN %s AND %s
+                ORDER BY message_id ASC
+                """,
+                (chat_id, mid - span, mid + span),
+            )
+            for row_mid, name, uname, msg, is_bot in cursor.fetchall():
+                if row_mid in seen:
+                    continue
+                try:
+                    text = decrypt(msg)
+                except Exception:
+                    continue
+                author = "БОТ" if is_bot else resolve_display_name(uname, name)
+                seen[row_mid] = f"[{row_mid}] {author}: {text}"
+    return [seen[k] for k in sorted(seen)]
 
 
 def _real_rows(chat_id, message_ids):
@@ -439,15 +472,19 @@ def discover_path_b(chat_id):
 # ------------------------------------------------------ subject resolution --
 
 def _resolve_subjects(chat_id, candidates):
-    """Read-only lookup (participants.resolve_participant_key, no writes)
-    so name-string variants of the same real person ("Саша Тигмен" /
-    "Sasha Tigmen" / "tigmen / Саша Тигмен") collapse to one canonical key
-    for dedup and per-subject capping, instead of silently multiplying past
-    the cap. Left unresolved (subject_key=None) when genuinely ambiguous or
-    unmatched -- surfaced to the reviewer via subject_raw, not guessed."""
+    """Read-only lookup (participants.resolve_subject_for_fact, no writes)
+    -- the same source-author-first resolver upsert_state actually uses,
+    NOT the plain name-matching resolve_participant_key: a self-report like
+    Игорь's own message about himself should resolve deterministically to
+    the author who wrote it even when "Игорь" alone is ambiguous among
+    known participants. Falls back to plain name matching only when
+    neither the author nor a reply-target signal applies, so it can only
+    resolve MORE cases than resolve_participant_key, never fewer. Left
+    unresolved (subject_key=None) when genuinely ambiguous or unmatched --
+    surfaced to the reviewer via subject_raw, not guessed."""
     for c in candidates:
         raw = c.get("subject_raw")
-        resolved = resolve_participant_key(chat_id, raw) if raw else None
+        resolved = resolve_subject_for_fact(chat_id, raw, c.get("source_message_ids")) if raw else None
         c["subject_key"] = resolved[0] if resolved else None
         c["subject_display"] = resolved[1] if resolved else raw
     return candidates
@@ -494,38 +531,48 @@ def _flag_contradictions(candidates):
 
 def _dedupe(candidates):
     """Semantic dedup on the claim text -- moments (path A) and raw-chunk
-    scanning (path B) can independently surface the same real fact."""
+    scanning (path B) can independently surface the same real fact. A near-
+    duplicate is MERGED into the kept candidate (union of source_message_ids,
+    both discovery_paths recorded, support upgraded if the new one is
+    stronger) rather than discarded -- two independent paths agreeing on the
+    same fact is a useful corroboration signal, not noise to throw away."""
     if not candidates:
         return []
     embeddings = [embed(c["claim"]) for c in candidates]
     kept = []
     kept_embeddings = []
     for cand, emb in zip(candidates, embeddings):
-        is_dup = False
-        for kept_emb in kept_embeddings:
+        merge_target = None
+        for i, kept_emb in enumerate(kept_embeddings):
             dot = sum(a * b for a, b in zip(emb, kept_emb))
             na = sum(a * a for a in emb) ** 0.5
             nb = sum(b * b for b in kept_emb) ** 0.5
             if na and nb and dot / (na * nb) > 0.92:
-                is_dup = True
+                merge_target = kept[i]
                 break
-        if not is_dup:
+        if merge_target is None:
+            cand.setdefault("discovery_paths", [cand["path"]])
             kept.append(cand)
             kept_embeddings.append(emb)
+            continue
+        merge_target["source_message_ids"] = sorted(set(merge_target["source_message_ids"]) | set(cand["source_message_ids"]))
+        merge_target.setdefault("discovery_paths", [merge_target["path"]])
+        if cand["path"] not in merge_target["discovery_paths"]:
+            merge_target["discovery_paths"].append(cand["path"])
+        if cand.get("support") == "fully_supported":
+            merge_target["support"] = "fully_supported"
     return kept
 
 
-def _select_best(candidates, target=70, max_per_subject=5):
-    """Below target, there's no real competition for slots -- capping per
-    subject there would just throw away good candidates for no benefit, so
-    the cap only kicks in once the pool actually needs trimming. Caps on
-    the resolved subject_key when available (falls back to normalized
-    subject_raw), so name-string variants of the same person can't each
-    get their own separate quota."""
+def _select_best(candidates, max_per_subject=8):
+    """Orders by support, caps per resolved subject_key (falls back to
+    normalized subject_raw) so one person can't dominate the sheet. No
+    separate global-size target: with a pool this small the per-subject cap
+    alone is enough -- a "trim to top N" step on top of it was producing a
+    confusing off-by-one mismatch between the configured target and the
+    actual sheet size (71 candidates, target=70)."""
     support_rank = {"fully_supported": 0, "partially_supported": 1}
     candidates = sorted(candidates, key=lambda c: support_rank.get(c.get("support"), 1))
-    if len(candidates) <= target:
-        return candidates
     selected = []
     per_subject = {}
     for c in candidates:
@@ -534,14 +581,14 @@ def _select_best(candidates, target=70, max_per_subject=5):
             continue
         selected.append(c)
         per_subject[subj] = per_subject.get(subj, 0) + 1
-        if len(selected) >= target:
-            break
     return selected
 
 
 # --------------------------------------------------------------- output --
 
 def _render_markdown(candidates, chat_id):
+    import datetime
+
     lines = ["# Gold candidate review sheet (v2)", "", f"Всего кандидатов на проверку: {len(candidates)}", ""]
     for i, c in enumerate(candidates, start=1):
         lines.append(f"### {i}.")
@@ -552,18 +599,27 @@ def _render_markdown(candidates, chat_id):
             subject_display += "  ⚠ не резолвится однозначно к участнику чата"
         lines.append(f"Subject: {subject_display}")
         lines.append(f"Epistemic status: {c.get('epistemic_status')}")
-        lines.append(f"Discovery path: {c['path']}")
+        paths = c.get("discovery_paths") or [c["path"]]
+        path_label = " + ".join(paths) + ("  (оба пути независимо нашли этот факт)" if len(paths) > 1 else "")
+        lines.append(f"Discovery path: {path_label}")
+
+        source_rows = _real_rows(chat_id, c["source_message_ids"])
+        dates = [datetime.datetime.fromtimestamp(r["date"]).strftime("%Y-%m-%d %H:%M") for r in source_rows if r.get("date")]
+        if dates:
+            span = f"{min(dates)}" if min(dates) == max(dates) else f"{min(dates)} .. {max(dates)}"
+            lines.append(f"Observed at (source message dates): {span}")
+
         lines.append("Sources:")
-        for row in _real_rows(chat_id, c["source_message_ids"]):
+        for row in source_rows:
             lines.append(f"- [{row['message_id']}] {row['author']}: {row['text'][:200]}")
         lines.append(f"Suggested support: {c.get('support')}")
         if c.get("contradiction_note"):
             lines.append(f"{c['contradiction_note']}")
         lines.append("")
-        lines.append("<details><summary>Локальный контекст вокруг первого источника</summary>")
+        lines.append("<details><summary>Локальный контекст вокруг источников</summary>")
         lines.append("")
         lines.append("```")
-        for ctx_line in _local_context(chat_id, c["source_message_ids"][0]):
+        for ctx_line in _local_context_multi(chat_id, c["source_message_ids"]):
             lines.append(ctx_line)
         lines.append("```")
         lines.append("</details>")
@@ -573,6 +629,14 @@ def _render_markdown(candidates, chat_id):
         lines.append("- [ ] edit")
         lines.append("- [ ] reject")
         lines.append("- [ ] ambiguous attribution")
+        lines.append("")
+        lines.append("Manual annotation (fill in during review):")
+        lines.append("- memory_worthy: [ ] yes  [ ] no")
+        lines.append("- assertion_mode: [ ] literal  [ ] joke  [ ] sarcasm  [ ] rumor  [ ] uncertain")
+        lines.append("- temporal_scope: [ ] persistent  [ ] transient  [ ] event")
+        lines.append("- subject_type: [ ] person  [ ] group  [ ] other")
+        lines.append("- sources_sufficient: [ ] yes  [ ] no")
+        lines.append("- edited_claim: ")
         lines.append("")
         lines.append("---")
         lines.append("")
@@ -592,9 +656,9 @@ def run():
     _flag_contradictions(deduped)
 
     with open("/tmp/gold_candidates_raw_v2.json", "w") as f:
-        json.dump(all_candidates, f, ensure_ascii=False, indent=2, default=str)
+        json.dump(deduped, f, ensure_ascii=False, indent=2, default=str)
 
-    selected = _select_best(deduped, target=70)
+    selected = _select_best(deduped)
     print(f"Selected for review sheet: {len(selected)}", file=sys.stderr)
 
     md = _render_markdown(selected, CHAT_ID)
