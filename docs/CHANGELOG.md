@@ -4,6 +4,24 @@
 
 ---
 
+## 2026-09-09 (первый paired baseline vs oracle-memory прогон + no-regression check)
+
+Первый прогон [research/memory_benchmark_paired_run.py](../research/memory_benchmark_paired_run.py) нашёл реальный баг: `AskState` (продовый TypedDict в `llm/graphs.py`) не объявляет поле `oracle_facts_used` — LangGraph при мерже стейта между узлами графа опирается на схему TypedDict и тихо ВЫБРАСЫВАЕТ любой ключ, которого нет в объявленной схеме. Само внедрение памяти в промпт при этом работало корректно (подтверждено прямой проверкой — текст ответа отражал контент из памяти), ломалось только диагностическое поле "какие факты подтянулись", которое явно требовалось сохранить (п.5 плана). Исправлено в [research/oracle_memory_eval.py](../research/oracle_memory_eval.py): новый `AskStateWithOracle(AskState, total=False)` с объявленным `oracle_facts_used`, используется ТОЛЬКО для oracle-графа (продовый `AskState`/`llm/graphs.py` не тронуты).
+
+**Итоговые числа (второй прогон, с рабочей диагностикой, 44 вопроса, не отфильтрованы)**:
+- `memory_correctness`: baseline 0.74 → oracle 0.95 (n=44)
+- `memory_attribution`: baseline 0.67 → oracle 0.76 (n=21, только opinion/reported_by_other факты)
+
+Важная оговорка: сравнивать надёжно можно только baseline-vs-oracle ВНУТРИ одного прогона — `generate_answer` использует temperature=0.3, так что абсолютные числа между двумя прогонами (первый: 0.79→0.88 / 0.71→0.71) естественно различаются из-за стохастики генерации, а не потому что фикс сам по себе улучшил качество (фикс на промпт не влиял, только на то, записывалось ли диагностическое поле). Оба прогона независимо согласны в направлении: correctness растёт стабильно; attribution растёт во втором прогоне, но не в первом — на n=21 при temp=0.3 это в пределах шума, нужно больше прогонов для уверенности именно по attribution.
+
+Конкретный качественный пример регрессии baseline / выигрыша oracle: на вопрос "Как Саша Резаков назвал Гордей?" baseline вообще не нашёл ответ ("В истории чата не нашёл ответа на этот вопрос"), oracle ответил верно благодаря memory_facts-ретриву, минуя слабость message-level поиска.
+
+**No-regression check** (`ask-pipeline-eval-run`, продовый `/ask`, память туда не подключена) — прогнан дважды: agent_goal 0.77→0.76 (n=38 оба раза), в пределах шума. Ожидаемо: продовый код в этом эксперименте не менялся вообще.
+
+Локальный paired JSON (вопрос, gold claim, оба ответа, retrieved oracle facts) — `/tmp/memory_benchmark_paired_results.json`, не в git.
+
+---
+
 ## 2026-09-09 (paired baseline vs oracle-memory runner — шаг 3)
 
 Новый [research/memory_benchmark_paired_run.py](../research/memory_benchmark_paired_run.py): поднимает sandbox и оба графа (`research/oracle_memory_eval.py`) ОДИН раз, гоняет все 44 вопроса из черновика через оба графа, пушит в Langfuse как ДВА именованных dataset-run эксперимента на одном датасете (`memory-benchmark-questions`) — `memory-benchmark-baseline` и `memory-benchmark-oracle` — чтобы сравнивать бок о бок в UI. Два новых judge'а в этом же файле (не в `tests/evals/judges.py` — те скорят против сырых окон сообщений, у этих есть прямой доступ к замороженному gold claim):

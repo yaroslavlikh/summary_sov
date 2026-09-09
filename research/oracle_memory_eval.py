@@ -253,11 +253,24 @@ def build_ask_graph_baseline():
     return graph.compile()
 
 
+class AskStateWithOracle(AskState, total=False):
+    """AskState plain doesn't declare oracle_facts_used, and LangGraph's
+    TypedDict-schema-based state merge silently DROPS any key a node
+    returns that isn't part of the declared schema -- found via a real
+    bug: _generate_answer_oracle's return dict included oracle_facts_used,
+    the answer text correctly reflected the injected memory (confirmed by
+    direct diagnostic), but the field was always missing from the final
+    invoke() result. The prompt injection itself was never broken -- only
+    this diagnostic field was silently discarded."""
+    oracle_facts_used: list[str]
+
+
 def build_ask_graph_oracle():
     """Same as build_ask_graph_baseline() except generate_answer is the
     oracle-memory-augmented variant. Every other node is the SAME imported
-    production function."""
-    graph = StateGraph(AskState)
+    production function. Uses AskStateWithOracle (not AskState) so
+    oracle_facts_used actually survives the state merge."""
+    graph = StateGraph(AskStateWithOracle)
     graph.add_node("resolve_anchor", g._resolve_anchor)
     graph.add_node("classify_and_rewrite", g._classify_and_rewrite)
     graph.add_node("search_fts", g._search_fts)
