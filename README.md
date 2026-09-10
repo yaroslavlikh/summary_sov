@@ -1,195 +1,178 @@
-# Summary Bot
+# summary_sov
 
-Telegram-бот для автоматического сохранения и суммаризации переписок с использованием Groq API (gpt-oss).
+Telegram-бот для группового чата: саммаризация истории, ответы на вопросы
+по контексту переписки (RAG), накопление знаний о людях и группе, и
+исследовательский трек по provenance-bearing памяти для LLM-агентов.
 
-## Описание
+Построен на LangGraph (оркестрация `/ask` и `/summary`), Postgres + pgvector
+(гибридный full-text + семантический поиск), Groq (`gpt-oss-120b`/`20b`),
+с шифрованием сообщений at rest и опциональной трассировкой через Langfuse.
 
-Бот сохраняет все текстовые сообщения в Postgres и создаёт краткие содержания переписок: по запросу, по умолчанию с последнего вызова, и автоматически дважды в день. Саммари разбито на смысловые блоки с кликабельными ссылками на исходные сообщения.
+## Возможности
 
-## Основные функции
+- **Автосохранение** — все текстовые сообщения, голосовые (транскрибируются
+  локально через `faster-whisper`), фото и стикеры (описываются vision-моделью)
+  сохраняются в Postgres с `message_id` для последующих ссылок; текст
+  шифруется (Fernet) at rest.
+- **`/summary [N] [M]`** — саммари последних N сообщений (по умолчанию — все
+  с прошлого вызова) в M тезисах (по умолчанию 18), разбито на тематические
+  блоки с кликабельными ссылками на исходные сообщения. Автоматически дважды
+  в день (14:00 и 22:00 по `TIMEZONE`), если новых сообщений больше 10.
+- **`/ask <вопрос>`** — вопрос по истории чата: резолвится anchor (если это
+  reply), гибридный FTS+vector retrieval, LLM rerank, ответ с цитатами на
+  реальные сообщения. Бота можно не вызывать командой — простое упоминание
+  `@bot_username` в любом сообщении тоже триггерит `/ask`.
+- **Память о людях и группе** — `@bot запомни, что...`/`обращайся ко мне
+  как...` распознаётся семантически (не по ключевым словам) в том же
+  LLM-вызове, что уже классифицирует вопрос, без дополнительной задержки.
+  `/addcontext`, `/context`, `/removecontext` — заметки вручную;
+  `/learncontext` — автоматически строит портреты участников и находит
+  повторяющиеся паттерны по всей истории.
+- **Группы упоминаний** — `/creategroup`, `/addto`, `/removefrom`,
+  `/deletegroup`, `/groups`, `/ping <группа>` — позвать сразу несколько
+  человек.
 
-- Автоматическое сохранение всех текстовых сообщений
-- Автоматическая суммаризация каждый день в 14:00 и 22:00 (если сообщений больше 10)
-- Ручная суммаризация через команду `/summary`
-- По умолчанию — все сообщения с последнего вызова `/summary`, либо явное количество
-- Саммари разбито на тематические блоки с кликабельными ссылками на исходные сообщения
-- Интеграция с Groq API (gpt-oss)
+Полный список команд — `/help` в самом боте.
 
-## Установка и настройка
+## Установка
 
 ### Требования
 
-- Python 3.10 или выше
-- Telegram Bot Token
-- Groq API Key
-- Postgres база данных (например, Railway)
+- Python 3.10+
+- Telegram Bot Token ([@BotFather](https://t.me/BotFather))
+- Groq API Key ([console.groq.com/keys](https://console.groq.com/keys))
+- Postgres с расширением `pgvector` (например, Railway)
 
-### Шаги установки
+### Шаги
 
-1. Установите зависимости:
 ```bash
 pip install -r requirements.txt
 ```
 
-2. Создайте файл `.env` в корне проекта (см. `example.env`):
+Создайте `.env` в корне (см. `example.env`):
+
 ```env
-BOT_TOKEN=ваш_токен_telegram_бота
-GROQ_API_KEY=ваш_ключ_groq_api
+BOT_TOKEN=токен_telegram_бота
+GROQ_API_KEY=ключ_groq_api
 TIMEZONE=Europe/Kyiv
 DATABASE_URL=postgresql://user:password@host:port/dbname
-MESSAGE_ENCRYPTION_KEY=ключ Fernet
+MESSAGE_ENCRYPTION_KEY=ключ_Fernet
 RAILWAY_PUBLIC_DOMAIN=your-service.up.railway.app
+
+# опционально — включает трассировку LangGraph-узлов и LLM-вызовов
+LANGFUSE_PUBLIC_KEY=
+LANGFUSE_SECRET_KEY=
 ```
 
-3. Получите необходимые токены:
-   - **Telegram Bot Token**: создайте бота через [@BotFather](https://t.me/BotFather)
-   - **Groq API Key**: получите бесплатно на [console.groq.com/keys](https://console.groq.com/keys)
-   - **DATABASE_URL**: строка подключения к Postgres (например, из Railway — Variables вашего Postgres-сервиса)
+`MESSAGE_ENCRYPTION_KEY` — сгенерировать: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
 
-## Запуск
+### Запуск
 
 ```bash
 python main.py
 ```
 
-После успешного запуска в консоли появится сообщение "Бот запущен...".
-
-## Команды
-
-| Команда | Описание |
-|---------|----------|
-| `/help` | Показать справку по командам |
-| `/summary [N] [M]` | Саммари: N — сколько сообщений взять (по умолчанию — все с последнего вызова), M — сколько строк-тезисов (по умолчанию 18) |
-
-**Примеры:**
-- `/summary` — саммари всех сообщений с последнего вызова
-- `/summary 50` — саммари последних 50 сообщений
-- `/summary 50 10` — саммари последних 50 сообщений, максимум 10 тезисов
-
-## Принцип работы
-
-1. Бот перехватывает все текстовые сообщения (кроме команд) и сохраняет их в Postgres, включая Telegram `message_id` для последующих ссылок
-2. Сообщения от бота `sglypa_tg_bot` игнорируются
-3. Каждый день в 14:00 и 22:00 (по таймзоне из `TIMEZONE`) бот сам присылает саммари в каждый чат, если новых сообщений больше 10, иначе шлёт предупреждение
-4. Пользователь может запросить саммари вручную командой `/summary` в любой момент
-5. После каждого саммари для чата запоминается точка отсчёта (`chat_state.last_summary_msg_id`), от которой считается следующий "дефолтный" вызов
+Бот поднимает webhook-сервер (Flask + waitress) на `RAILWAY_PUBLIC_DOMAIN`,
+инициализирует/самопочиняет схему БД и запускает планировщик авто-саммари.
 
 ## Структура проекта
 
 ```
 summary_sov/
-├── main.py              # Точка входа приложения
-├── config.py            # Управление конфигурацией
-├── scheduler.py         # Фоновый планировщик авто-саммари (14:00 / 22:00)
-├── handlers/
-│   └── handlers.py      # Обработчики сообщений и команд, генерация саммари
+├── main.py                    # точка входа, webhook-сервер, init
+├── config.py                  # переменные окружения
+├── scheduler.py                # авто-саммари 14:00 / 22:00
+├── handlers/handlers.py        # все message/command-обработчики
 ├── llm/
-│   ├── groq_client.py    # ChatGroq-клиент и модели
-│   ├── graphs.py         # LangGraph-пайплайны /ask и /summary
-│   └── prompt.py         # Шаблон промпта для LLM
+│   ├── graphs.py                # LangGraph-графы /ask и /summary
+│   ├── groq_client.py           # ChatGroq-клиент, Langfuse tracing
+│   └── prompt.py                # шаблоны промптов
 ├── database/
-│   ├── db.py             # Пул соединений с Postgres
-│   └── init_db.py        # Инициализация/самопочинка схемы БД
-├── example.env           # Шаблон переменных окружения
-└── README.md              # Документация
+│   ├── db.py                    # пул соединений
+│   └── init_db.py               # самопочинающаяся схема
+├── memory_facts.py             # provenance-bearing память о состоянии людей
+├── participants.py             # резолюция subject → реальный участник чата
+├── chat_context.py             # заметки/портреты (/addcontext, /learncontext)
+├── chat_moments.py             # разовые моменты, ретрив по вектору
+├── context_learning.py         # построение портретов/moments из истории
+├── mention_groups.py           # группы для /ping
+├── crypto_utils.py             # шифрование сообщений at rest
+├── display_names.py            # маппинг username → отображаемое имя
+├── embeddings.py               # локальная sentence-transformers модель
+├── voice_transcription.py      # faster-whisper (локально, CPU)
+├── webhook_server.py           # Flask-приложение для Telegram webhook
+├── tests/                      # unittest, реальный sandboxed Postgres
+│   └── evals/                  # LLM-judge бенчмарк /ask на реальных данных
+├── research/                   # исследовательский трек памяти (см. ниже)
+└── docs/
+    ├── CHANGELOG.md             # хронология каждого изменения и почему
+    ├── eval_incidents.md        # сырой лог найденных инцидентов
+    └── paper_material.md        # материал для статьи
 ```
+
+## Исследовательский трек: prospective memory
+
+Отдельная линия работы (`research/`, задокументирована в
+`research/PROSPECTIVE_MEMORY_RETRIEVAL.md`) поверх основного бота: можно ли
+надёжно извлекать и переиспользовать provenance-bearing факты о людях/группе
+(`memory_facts`), и как честно это измерить, не обманывая себя на каждом шаге
+измерения. Кратко:
+
+- **Gold-датасет** — human-verified факты, независимые от production-экстракции
+  (иначе оценка циклична), заморожен с sha256-checksum.
+- **Forced-JSON extractor** — честная декомпозиция recall (не одно число).
+- **Oracle-memory эксперимент** — paired baseline vs oracle `/ask` на
+  memory-dependent вопросах.
+
+Все находки, включая реальные баги, пойманные по пути (circular evaluation,
+attribution collapse внутри собственного инструмента, LangGraph молча
+роняющий поле стейта) — в `docs/CHANGELOG.md` и `docs/paper_material.md`.
+Сырые датасеты и результаты экспериментов вне git (реальный контент чата) —
+см. `research/` скрипты для воспроизведения.
 
 ## База данных
 
-Postgres. Основные таблицы создаются и обновляются автоматически:
+Схема создаётся и самопочиняется автоматически при старте (`init_db()`).
+Основные таблицы: `messages` (шифрованный текст, `message_id` для ссылок,
+`search_vector`/`embedding` для гибридного поиска, `conversation_id` для
+группировки реплаев), `chat_state`, `chat_context`, `chat_moments`,
+`memory_facts`, `mention_groups`, `scheduler_runs`. Пара
+`(user_id, message_id)` уникальна — повторная доставка Telegram webhook не
+создаёт дубликаты.
 
-```sql
-CREATE TABLE messages (
-    id SERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL,       -- chat_id из Telegram
-    user_name TEXT NOT NULL,
-    message TEXT NOT NULL,
-    last_id INTEGER DEFAULT 0,     -- легаси-колонка, не используется
-    replied_message TEXT DEFAULT NULL,
-    message_id BIGINT,             -- Telegram message_id, для ссылок в саммари
-    message_thread_id BIGINT,      -- тема форума Telegram
-    reply_to_message_id BIGINT,
-    message_date BIGINT,
-    is_bot BOOLEAN NOT NULL DEFAULT FALSE,
-    search_vector TSVECTOR,
-    embedding VECTOR(384)
-);
-
-CREATE TABLE chat_state (
-    chat_id BIGINT PRIMARY KEY,
-    last_summary_msg_id INTEGER NOT NULL DEFAULT 0
-);
-```
-
-Дополнительно используются `mention_groups`, `chat_context`, `chat_moments`
-и `scheduler_runs`. Пара `(user_id, message_id)` уникальна, поэтому повторная
-доставка Telegram webhook не создаёт дубликаты.
-
-Схема создаётся и самопочиняется автоматически при старте (`init_db()`), в том числе если таблица уже существовала в устаревшем виде.
-
-## Конфигурация
-
-Переменные окружения в файле `.env`:
-
-- `BOT_TOKEN` — токен Telegram бота
-- `GROQ_API_KEY` — ключ API Groq
-- `DATABASE_URL` — строка подключения к Postgres
-- `TIMEZONE` — таймзона для расписания авто-саммари (по умолчанию `Europe/Kyiv`)
-- `MESSAGE_ENCRYPTION_KEY` — ключ Fernet для шифрования сообщений и заметок
-- `RAILWAY_PUBLIC_DOMAIN` — публичный домен webhook без `https://`
-
-## Проверка
+## Тесты
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-## Модели LLM
+unittest (не pytest) против реального sandboxed Postgres (изолированная
+схема на каждый прогон, никогда не моки). LLM-judge бенчмарк `/ask` на
+реальных исторических вызовах бота:
 
-Бот использует Groq API с автоматическим переключением моделей:
+```bash
+python3 tests/evals/run_eval.py
+```
 
-1. Первичная попытка: `openai/gpt-oss-120b`
-2. Резервная модель: `openai/gpt-oss-20b` (при недоступности основной)
+## Модели
 
-`/ask` и `/summary` выполняются как LangGraph-графы. Когда заданы
-`LANGFUSE_PUBLIC_KEY` и `LANGFUSE_SECRET_KEY`, Langfuse callback автоматически
-трассирует каждый узел и LLM-вызов внутри этих графов.
-
-## Формат суммаризации
-
-Краткое содержание формируется в следующем формате:
-
-- Заголовок `#summary`
-- Тематические блоки (жирный заголовок блока)
-- Тезисы с дефисом, вложенные подпункты с отступом в 2 пробела
-- Каждый тезис — кликабельные номера, ведущие на исходные сообщения в Telegram
-- Сохранение оригинального тона переписки (шутки, сарказм, мемы)
+- Основная: `openai/gpt-oss-120b`, фолбэк: `openai/gpt-oss-20b` (Groq).
+- Локальные: `sentence-transformers` (эмбеддинги, 384-мерные), `faster-whisper`
+  medium (транскрипция голосовых, CPU).
+- `/ask` и `/summary` — LangGraph-графы; с заданными `LANGFUSE_PUBLIC_KEY`/
+  `LANGFUSE_SECRET_KEY` каждый узел и LLM-вызов трассируется автоматически.
 
 ## Устранение проблем
 
-### Бот не отвечает на сообщения
+**Бот не отвечает** — проверьте `BOT_TOKEN` в переменных окружения сервера
+(не только локальный `.env`), что webhook принят Telegram (`RAILWAY_PUBLIC_DOMAIN`
+корректен) и бот добавлен в чат.
 
-- Проверьте корректность `BOT_TOKEN` в Variables на сервере (не только в локальном `.env` — это два разных места)
-- Убедитесь, что бот запущен и нет ошибок в логах деплоя
-- Проверьте, что бот добавлен в чат/группу
+**Ошибки при генерации** — проверьте `GROQ_API_KEY` и его лимиты.
 
-### Ошибки при создании суммаризации
-
-- Проверьте корректность `GROQ_API_KEY`
-- Убедитесь в наличии доступа и лимитов API ключа
-- Проверьте наличие сообщений в базе данных
-
-### Проблемы с базой данных
-
-- Проверьте, что `DATABASE_URL` указывает на актуальный (internal, если бот и Postgres в одном Railway-проекте) адрес
-- Локально для подключения снаружи Railway используйте публичный proxy-адрес (`DATABASE_PUBLIC_URL`), а не internal — он недоступен за пределами приватной сети Railway
-
-## Технические детали
-
-- **Библиотека для Telegram**: pyTelegramBotAPI (telebot)
-- **База данных**: Postgres (psycopg2, пул соединений)
-- **LLM API**: Groq (gpt-oss)
-- **Управление конфигурацией**: python-dotenv
+**Проблемы с БД** — `DATABASE_URL` должен указывать на internal-адрес, если
+бот и Postgres в одном Railway-проекте; для подключения снаружи используйте
+публичный proxy-адрес, не internal.
 
 ## Лицензия
 
