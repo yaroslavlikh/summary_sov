@@ -196,4 +196,92 @@ def init_db():
             "USING hnsw (embedding vector_cosine_ops);"
         )
 
+        # Episodic memory (episodic_memory.py): immutable events with addressable
+        # sources, linked into append-only episodes. Replaces memory_facts as
+        # the write path; memory_facts stays as a read-only record. Text fields
+        # hold chat content and are encrypted like messages.message.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS memory_cursor (
+                chat_id BIGINT PRIMARY KEY,
+                last_row_id INTEGER NOT NULL DEFAULT 0,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );""")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS memory_worker_lease (
+                chat_id BIGINT PRIMARY KEY,
+                holder TEXT NOT NULL,
+                expires_at TIMESTAMPTZ NOT NULL
+            );""")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS memory_blocks (
+                id BIGSERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                block_key TEXT NOT NULL,
+                session_key TEXT NOT NULL,
+                first_row_id INTEGER NOT NULL,
+                last_row_id INTEGER NOT NULL,
+                message_count INTEGER NOT NULL,
+                raw_items INTEGER NOT NULL,
+                events INTEGER NOT NULL,
+                rejected JSONB NOT NULL DEFAULT '{}'::jsonb,
+                schema_version TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (chat_id, block_key)
+            );""")
+        cursor.execute("ALTER TABLE memory_blocks ADD COLUMN IF NOT EXISTS row_ids INTEGER[] NOT NULL DEFAULT '{}';")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS memory_events (
+                id BIGSERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                block_id BIGINT NOT NULL REFERENCES memory_blocks(id),
+                event_text TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                viewpoint_owner TEXT,
+                subject TEXT,
+                temporal_mode TEXT NOT NULL,
+                observed_at BIGINT,
+                evidence TEXT NOT NULL,
+                source_message_ids BIGINT[] NOT NULL,
+                local_context_message_ids BIGINT[] NOT NULL DEFAULT '{}',
+                embedding vector(384) NOT NULL,
+                schema_version TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );""")
+        cursor.execute("CREATE INDEX IF NOT EXISTS memory_events_chat_idx ON memory_events (chat_id, observed_at);")
+        # Resolved participants, so "кто такой X" can query memory by person instead of
+        # relying on cosine similarity over a free-text name.
+        cursor.execute("ALTER TABLE memory_events ADD COLUMN IF NOT EXISTS subject_key TEXT;")
+        cursor.execute("ALTER TABLE memory_events ADD COLUMN IF NOT EXISTS owner_key TEXT;")
+        cursor.execute("CREATE INDEX IF NOT EXISTS memory_events_subject_idx ON memory_events (chat_id, subject_key);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS memory_events_owner_idx ON memory_events (chat_id, owner_key);")
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS memory_events_embedding_idx ON memory_events
+                USING hnsw (embedding vector_cosine_ops);""")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS memory_episodes (
+                id BIGSERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                viewpoint_owner TEXT,
+                subject TEXT,
+                event_count INTEGER NOT NULL DEFAULT 0,
+                last_event_id BIGINT REFERENCES memory_events(id),
+                link_embedding vector(384),
+                index_embedding vector(384),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );""")
+        cursor.execute("CREATE INDEX IF NOT EXISTS memory_episodes_chat_idx ON memory_episodes (chat_id);")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS memory_episode_events (
+                episode_id BIGINT NOT NULL REFERENCES memory_episodes(id),
+                event_id BIGINT NOT NULL UNIQUE REFERENCES memory_events(id),
+                position INTEGER NOT NULL,
+                operation TEXT NOT NULL,
+                confidence REAL,
+                rationale TEXT,
+                defaulted BOOLEAN NOT NULL DEFAULT FALSE,
+                candidate_episode_ids BIGINT[] NOT NULL DEFAULT '{}',
+                PRIMARY KEY (episode_id, position)
+            );""")
+
         conn.commit()

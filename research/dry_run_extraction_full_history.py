@@ -15,6 +15,12 @@ upsert_state candidate the model proposed -- including ones that would have
 been rejected (ambiguous subject, out-of-batch source) -- for manual review.
 
 Usage: python3 -m research.dry_run_extraction_full_history
+
+OBSOLETE (2026-09-17): the upsert_state tool this script dry-runs was removed
+from the /summary graph together with writes to memory_facts; build_summary_graph
+no longer takes batch ids or a write_state hook. Memory is now built by
+episodic_memory.py, whose own extraction is exercised by
+tests/test_episodic_memory.py. Kept for the record of how the old stage behaved.
 """
 import json
 import sys

@@ -127,12 +127,21 @@ def _sync_dataset(langfuse, chat_id, limit):
 
     cases = mine_cases(chat_id, limit=limit)
     for case in cases:
-        langfuse.create_dataset_item(
-            dataset_name=DATASET_NAME,
-            id=f"ask-row-{case['source_row_id']}",
-            input=case,
-            metadata={"chat_id": chat_id, "asker_name": case["asker_name"]},
-        )
+        # Item ids are unique per project across datasets, and a deleted id stays
+        # reserved, so an id another dataset has claimed gets a namespaced fallback
+        # instead of failing the whole sync.
+        for item_id in (f"ask-row-{case['source_row_id']}", f"askpipe-row-{case['source_row_id']}"):
+            try:
+                langfuse.create_dataset_item(
+                    dataset_name=DATASET_NAME,
+                    id=item_id,
+                    input=case,
+                    metadata={"chat_id": chat_id, "asker_name": case["asker_name"]},
+                )
+                break
+            except Exception as error:
+                if "already exists in another dataset" not in str(error):
+                    raise
     return cases
 
 

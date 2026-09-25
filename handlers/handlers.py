@@ -1,14 +1,19 @@
 import base64
+import os
+import random
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+import ask_metrics
 from chat_context import add_note, list_notes, remove_note
+from config import episodes_in_ask_enabled
 from context_learning import learn_context
 from crypto_utils import decrypt, encrypt
 from database.db import get_conn
 from display_names import resolve_display_name
 from embeddings import embed, to_vector_literal
+from llm.answer_judges import judge_answer
 from llm.graphs import _format_citations, run_ask_graph_merged, run_summary_graph
 from llm.groq_client import caption_image
 from mention_groups import (
@@ -191,7 +196,6 @@ def _generate_and_send_summary(bot, chat_id, requested_n=None, requested_m=18, t
         "prompt_body": prompt_body,
         "lines": lines,
         "extraction_lines": extraction_lines,
-        "batch_message_ids": {msg_id for _, msg_id, *_ in rows if msg_id is not None},
         "legend": legend,
         "max_lines": requested_m,
         "newest_included_id": newest_included_id,
@@ -335,11 +339,35 @@ def _save_bot_answer(
         print(f"Ошибка при сохранении ответа бота: {e}")
 
 
+def _langfuse_client():
+    if not (os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY")):
+        return None
+    try:
+        from langfuse import get_client
+
+        return get_client()
+    except Exception as e:
+        print(f"Langfuse недоступен: {e}")
+        return None
+
+
+def _online_judge(trace_id, question, asker_name, final):
+    """Sampled quality scores on a real answer. Runs in the background pool after
+    the answer is already sent, so a slow or failing judge never delays /ask."""
+    try:
+        scores = judge_answer(question, asker_name, final.get("answer_plain"),
+                              final.get("context_lines") or [], final.get("episode_context") or "")
+        for name, score in scores.items():
+            ask_metrics.push_scores({name: score["value"]}, trace_id=trace_id, comment=score["comment"])
+    except Exception as e:
+        print(f"Ошибка онлайн-судьи: {e}")
+
+
 def answer_chat_question(
     bot, chat_id, question, replied_message_id=None, bot_username=None,
     asker_name="неизвестный", thread_id=None,
 ):
-    run_ask_graph_merged({
+    state = {
         "bot": bot,
         "chat_id": chat_id,
         "question": question,
@@ -348,7 +376,27 @@ def answer_chat_question(
         "bot_username": bot_username,
         "thread_id": thread_id,
         "save_bot_answer": _save_bot_answer,
-    })
+    }
+    client = _langfuse_client()
+    started = time.perf_counter()
+    if client is None:
+        run_ask_graph_merged(state)
+        return
+    # The mechanical metrics of every answer, and a sampled LLM rubric on top of
+    # them, are recorded against the same trace the LangGraph nodes report into --
+    # the production counterpart of tests/evals/compare_episodes.py.
+    with client.start_as_current_observation(name="ask", as_type="agent", input={"question": question}):
+        final = run_ask_graph_merged(state)
+        trace_id = client.get_current_trace_id()
+    latency = time.perf_counter() - started
+    condition = "episodes" if episodes_in_ask_enabled() else "raw"
+    ask_metrics.push_scores(ask_metrics.collect(final, condition, latency), trace_id=trace_id)
+    try:
+        rate = float(os.getenv("ONLINE_JUDGE_SAMPLE_RATE", "0.25"))
+    except ValueError:
+        rate = 0.25
+    if final.get("answer_plain") and random.random() < rate:
+        _background_pool.submit(_online_judge, trace_id, question, asker_name, final)
 
 
 def load_handlers(bot):

@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Temporal Episodes — EverMemBench</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 1600px; height: 1100px; overflow: hidden; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+    color: #f7f5ff;
+    background:
+      radial-gradient(900px 620px at 92% -5%, rgba(133,91,255,.28), transparent 68%),
+      radial-gradient(760px 520px at -5% 105%, rgba(20,219,170,.16), transparent 65%),
+      #090b12;
+  }
+  .page { position: relative; width: 100%; height: 100%; padding: 72px 78px 60px; }
+  .grain { position: absolute; inset: 0; opacity: .16; pointer-events: none; background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.14'/%3E%3C/svg%3E"); }
+  header { position: relative; display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 54px; }
+  .eyebrow { color: #a79bbf; letter-spacing: .16em; text-transform: uppercase; font-weight: 700; font-size: 18px; margin-bottom: 18px; }
+  h1 { margin: 0; width: 990px; font-size: 72px; line-height: 1.02; letter-spacing: -.045em; font-weight: 760; }
+  h1 span { background: linear-gradient(92deg, #f4f0ff 0%, #bca9ff 48%, #77f3ce 100%); -webkit-background-clip: text; color: transparent; }
+  .seal { margin-top: 6px; border: 1px solid rgba(255,255,255,.18); background: rgba(255,255,255,.055); border-radius: 999px; padding: 14px 20px; color: #d9d2ea; font-size: 17px; font-weight: 650; white-space: nowrap; }
+  .content { position: relative; display: grid; grid-template-columns: 1.45fr .9fr; gap: 68px; }
+  .chart-title { font-size: 21px; color: #b8b0ca; margin-bottom: 28px; }
+  .row { display: grid; grid-template-columns: 210px 1fr 96px; align-items: center; gap: 18px; margin: 18px 0; }
+  .name { font-size: 23px; font-weight: 650; color: #dcd6e8; }
+  .bar-track { height: 52px; border-radius: 13px; background: rgba(255,255,255,.065); overflow: hidden; }
+  .bar { height: 100%; border-radius: 13px; background: linear-gradient(90deg, rgba(150,122,255,.72), rgba(150,122,255,.93)); }
+  .row.ours { margin: 21px 0 26px; }
+  .row.ours .name { color: #fff; font-size: 25px; }
+  .row.ours .bar-track { height: 62px; background: rgba(118,241,205,.10); box-shadow: 0 0 0 1px rgba(118,241,205,.12) inset; }
+  .row.ours .bar { background: linear-gradient(90deg, #8b67ff 0%, #71e6c2 100%); box-shadow: 0 0 30px rgba(113,230,194,.22); }
+  .value { text-align: right; font-size: 27px; font-weight: 760; font-variant-numeric: tabular-nums; }
+  .ours .value { color: #78efd0; font-size: 32px; }
+  .scale { display: flex; justify-content: space-between; margin-left: 228px; color: #777184; font-size: 15px; }
+  .side { padding-left: 10px; }
+  .hero-stat { padding: 29px 30px 28px; border-radius: 26px; background: linear-gradient(145deg, rgba(139,103,255,.18), rgba(113,230,194,.08)); box-shadow: 0 0 0 1px rgba(255,255,255,.12) inset; margin-bottom: 22px; }
+  .hero-stat .label { font-size: 19px; color: #c7bfd8; margin-bottom: 12px; }
+  .hero-stat .big { font-size: 70px; line-height: 1; letter-spacing: -.04em; font-weight: 780; color: #79efd0; }
+  .hero-stat .flow { margin-top: 12px; font-size: 24px; font-weight: 660; }
+  .hero-stat .note { margin-top: 8px; color: #aaa1bd; font-size: 16px; }
+  .mini-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
+  .mini { min-height: 126px; padding: 22px 22px; border-radius: 21px; background: rgba(255,255,255,.055); box-shadow: 0 0 0 1px rgba(255,255,255,.10) inset; }
+  .mini .n { font-size: 38px; font-weight: 760; letter-spacing: -.03em; }
+  .mini .l { margin-top: 7px; font-size: 15px; line-height: 1.25; color: #aaa3b8; }
+  footer { position: absolute; left: 78px; right: 78px; bottom: 49px; display: flex; justify-content: space-between; align-items: flex-end; padding-top: 25px; border-top: 1px solid rgba(255,255,255,.12); }
+  .foot-main { font-size: 18px; color: #cbc4d7; }
+  .foot-main b { color: #f6f3fb; }
+  .foot-note { max-width: 610px; text-align: right; font-size: 14px; line-height: 1.35; color: #817b8d; }
+</style>
+</head>
+<body>
+<main class="page">
+  <div class="grain"></div>
+  <header>
+    <div>
+      <div class="eyebrow">EverMemBench · 51 023 сообщений · 2 400 QA</div>
+      <h1><span>Память, которая понимает изменения</span></h1>
+    </div>
+    <div class="seal">GPT‑4.1‑mini · одинаковый answer model</div>
+  </header>
+
+  <section class="content">
+    <div>
+      <div class="chart-title">Macro accuracy · девять задач · выше — лучше</div>
+      <div class="row ours">
+        <div class="name">Temporal Episodes</div><div class="bar-track"><div class="bar" style="width:94.32%"></div></div><div class="value">47.16%</div>
+      </div>
+      <div class="row">
+        <div class="name">MemOS</div><div class="bar-track"><div class="bar" style="width:85.10%"></div></div><div class="value">42.55%</div>
+      </div>
+      <div class="row">
+        <div class="name">Zep</div><div class="bar-track"><div class="bar" style="width:79.94%"></div></div><div class="value">39.97%</div>
+      </div>
+      <div class="row">
+        <div class="name">Mem0</div><div class="bar-track"><div class="bar" style="width:74.18%"></div></div><div class="value">37.09%</div>
+      </div>
+      <div class="row">
+        <div class="name">MemoBase</div><div class="bar-track"><div class="bar" style="width:68.54%"></div></div><div class="value">34.27%</div>
+      </div>
+      <div class="scale"><span>0%</span><span>25%</span><span>50%</span></div>
+    </div>
+
+    <aside class="side">
+      <div class="hero-stat">
+        <div class="label">Temporal reasoning</div>
+        <div class="big">+7.7 п.п.</div>
+        <div class="flow">12.3% → 20.0%</div>
+        <div class="note">p = 0.0032 · 300 вопросов</div>
+      </div>
+      <div class="mini-grid">
+        <div class="mini"><div class="n">+4.61</div><div class="l">п.п. к лучшей опубликованной memory-системе</div></div>
+        <div class="mini"><div class="n">+33%</div><div class="l">относительный рост evidence recall</div></div>
+        <div class="mini"><div class="n">+2.1 ms</div><div class="l">накладные расходы retrieval</div></div>
+        <div class="mini"><div class="n">$8.88</div><div class="l">оценка полной стоимости эксперимента</div></div>
+      </div>
+    </aside>
+  </section>
+
+  <footer>
+    <div class="foot-main"><b>Temporal Episodes</b> · query-independent · provenance-backed · no global knowledge graph</div>
+    <div class="foot-note">Сопоставление с опубликованной Table 4 при том же GPT‑4.1‑mini. Adapter evaluation под официальным harness; не официальная leaderboard submission. Общий paired effect: +0.7 п.п., 95% CI пересекает ноль.</div>
+  </footer>
+</main>
+</body>
+</html>

@@ -1,4 +1,10 @@
-"""Prospective, provenance-bearing "state" memory -- see
+"""SUPERSEDED (2026-09-17) by episodic_memory.py, which now builds memory
+query-independently from a background worker. Nothing writes here any more: the
+upsert_state tool was removed from the /summary graph, and the table is kept as
+a read-only record of what this stage produced (7 rows) plus the subject
+resolution its tests cover. New code should use episodic_memory.
+
+Prospective, provenance-bearing "state" memory -- see
 research/PROSPECTIVE_MEMORY_RETRIEVAL.md (Stage 0/1, hardened). Separate
 from chat_context/chat_moments on purpose: those two lose their source
 message_ids at write time, so a derived fact can never be cited back to raw

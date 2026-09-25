@@ -7,3 +7,18 @@ result.json
 # Raw chat-derived research outputs -- real names/health/politics/etc, never commit
 research/*review_sheet*.md
 research/*_candidates*.json
+.research_runs/
+
+# Local career-search artifacts -- contain contact details and private notes
+career_profile.md
+job_search_strategy.md
+vacancy_*.md
+*vacancy*.md
+application_*.md
+interview_prep_*.md
+portfolio_audit.md
+PORTFOLIO_EVIDENCE.md
+portfolio_demo_script.md
+employer_stability_check.md
+output/
+tmp/

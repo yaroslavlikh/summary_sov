@@ -43,3 +43,19 @@ def get_encryption_key():
     if not key:
         print("Ошибка: MESSAGE_ENCRYPTION_KEY не найден в .env файле")
     return key
+
+
+def _flag(name, default):
+    value = os.getenv(name)
+    return default if value is None else value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def episodes_in_ask_enabled():
+    """Episodes ranked in /ask next to raw messages. Off until
+    tests/evals/compare_episodes.py passes docs/EPISODES_ROLLOUT_PROTOCOL.md."""
+    return _flag('MEMORY_EPISODES_IN_ASK', False)
+
+
+def memory_worker_enabled():
+    """Background construction of episodic memory (scheduler.py)."""
+    return _flag('MEMORY_WORKER_ENABLED', True)

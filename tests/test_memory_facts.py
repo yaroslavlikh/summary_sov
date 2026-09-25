@@ -224,14 +224,6 @@ class MemoryFactsTestCase(unittest.TestCase):
         active = self.mf.get_active_facts(CHAT_ID, [misha_key], limit=50)
         self.assertNotIn(fact_id, [f["id"] for f in active])
 
-    # ---- 10. source outside current summary batch rejected (graphs.py layer) ----
-    def test_source_outside_batch_rejected(self):
-        from llm.graphs import _filter_to_batch
-        batch = {68121, 68125}
-        self.assertEqual(_filter_to_batch([68121, 99999], batch), [68121])
-        self.assertEqual(_filter_to_batch([99999], batch), [])
-        self.assertEqual(_filter_to_batch([68121, 68125], batch), [68121, 68125])
-
 
 if __name__ == "__main__":
     unittest.main()

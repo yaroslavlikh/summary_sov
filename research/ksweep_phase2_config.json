@@ -1,0 +1,24 @@
+{
+  "k": 20,
+  "k_reference": 10,
+  "conditions": ["RAW", "RAW+EVENTS"],
+  "sample": {
+    "seed": 20260917,
+    "design": "stratified by the 9 official categories, proportional allocation by largest remainder (ties broken by category name); within each category a seeded permutation, the first n_c questions are taken",
+    "fixed_before_any_call": true
+  },
+  "budget_usd": {
+    "estimate_target": 0.85,
+    "hard_guard_accumulated_plus_next_call": 0.90,
+    "declared_cap": 1.0
+  },
+  "prices_usd_per_million_tokens": {
+    "openai/gpt-4.1-mini": {"input": 0.40, "output": 1.60},
+    "google/gemini-3-flash-preview": {"input": 0.50, "output": 3.00}
+  },
+  "price_source": "research/paper_benchmark_common.py MODEL_PRICES_USD_PER_M, snapshot dated 2026-09-12; the pages cited for it in research/PAPER_BENCHMARK_PROTOCOL.md are https://openrouter.ai/openai/gpt-4.1-mini/pricing and https://openrouter.ai/google/gemini-3-flash-preview/pricing. Not re-verified for this run.",
+  "fee_factor": 1.10,
+  "fee_factor_source": "FEE_FACTOR in research/final_sprint_evermembench.py: a conservative margin applied on top of list token prices in the previous paid runs; not a published OpenRouter per-token markup",
+  "cost_basis": "actual usage.prompt_tokens and usage.completion_tokens returned by the API, times the prices above, times fee_factor; every judge attempt is counted",
+  "output_estimate": "mean completion tokens of paid calls in the sealed runs, per condition and question type for answers; pooled over sealed judge calls (keys prefixed 'judge:') for the judge, times mean paid attempts per judged row"
+}
